@@ -61,7 +61,7 @@ class BoundedModule(nn.Module):
             'conv_mode': 'patches',
             'sparse_intermediate_bounds': True,
             'sparse_conv_intermediate_bounds': True,
-            'sparse_intermediate_bounds_with_ibp': True,
+            'sparse_intermediate_bounds_with_ibp': False,
             'sparse_features_alpha': True,
             'sparse_spec_alpha': True,
             'minimum_sparsity': 0.9,
@@ -938,6 +938,8 @@ class BoundedModule(nn.Module):
             node.clamp_interim_bounds()
         # FIXME (12/28): we should be consistent, and only use
         # node.interval, do not use node.lower or node.upper!
+        # node.lower = torch.max(node.interval[0], node.lower)
+        # node.upper = torch.min(node.interval[1], node.upper)
         node.interval = (node.lower, node.upper)
 
     def merge_A_dict(self, lA_dict, uA_dict):
@@ -1203,7 +1205,7 @@ class BoundedModule(nn.Module):
                 return ret2  # ret2[0] is None.
 
 
-        return self._compute_bounds_main(C=C,
+        hoho = self._compute_bounds_main(C=C,
                                          method=method,
                                          IBP=IBP,
                                          bound_lower=bound_lower,
@@ -1214,6 +1216,7 @@ class BoundedModule(nn.Module):
                                          alpha_idx=alpha_idx,
                                          need_A_only=need_A_only,
                                          update_mask=update_mask)
+        return hoho
 
     def save_intermediate(self, save_path=None):
         r"""A function for saving intermediate bounds.

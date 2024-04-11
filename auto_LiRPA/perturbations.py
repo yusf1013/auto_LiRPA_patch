@@ -6,6 +6,7 @@ import torch
 from .utils import logger, eyeC
 from .patches import Patches, patches_to_matrix
 from .linear_bound import LinearBound
+import torch.nn.functional as F
 
 
 class Perturbation:
@@ -126,6 +127,153 @@ class PerturbationL0Norm(Perturbation):
 
     def __repr__(self):
         return 'PerturbationLpNorm(norm=0, eps={})'.format(self.eps)
+
+
+class PerturbationL0NormPatch(Perturbation):
+    """Perturbation constrained by the L_0 norm.
+
+    Assuming input data is in the range of 0-1.
+    """
+
+    def __init__(self, eps, image, x_L=None, x_U=None):
+        self.eps = eps
+        self.x_U = x_U
+        self.x_L = x_L
+        self.lower_values = torch.zeros_like(image)
+        self.upper_values = torch.ones_like(image)
+        self.dif = torch.nonzero(torch.ones_like(image))
+
+    def concretize(self, x, A, sign=-1, aux=None):
+        if A is None:
+            return None
+
+        input_dim = x[0].shape
+
+        eps = torch.ceil(self.eps)
+        # x = x.reshape(x.shape[0], -1, 1)
+        # center = A.matmul(x)
+        #
+        # x = x.reshape(x.shape[0], 1, -1)
+        #
+        # original = A * x.expand(x.shape[0], A.shape[-2], x.shape[2])
+        # neg_mask = A < 0
+        # pos_mask = A >= 0
+        #
+        # if sign == 1:
+        #     A_diff = torch.zeros_like(A)
+        #     # A_diff[pos_mask] = A[pos_mask] - original[pos_mask] # changes that one weight can contribute to the value
+        #     # A_diff[neg_mask] = - original[neg_mask]
+        #
+        #     A_diff[pos_mask] = (A * self.upper_values.view(1, 1, 28*28) - original)[pos_mask]
+        #     A_diff[neg_mask] = (A * self.lower_values.view(1, 1, 28*28) - original)[neg_mask]
+        # else:
+        #     A_diff = torch.zeros_like(A)
+        #     # A_diff[pos_mask] = original[pos_mask]
+        #     # A_diff[neg_mask] = (original - A)[neg_mask]
+        #     A_diff[pos_mask] = (original - A * self.lower_values.view(1, 1, 28*28))[pos_mask]
+        #     A_diff[neg_mask] = (original - A * self.upper_values.view(1, 1, 28*28))[neg_mask]
+        #
+        #
+        # # FIXME: this assumes the input pixel range is between 0 and 1!
+        # # A_diff, _= torch.sort(A_diff, dim = 2, descending=True)
+        # # bound = center + sign * A_diff[:, :, :eps].sum(dim = 2).unsqueeze(2) * self.ratio
+        #
+        # result = torch.reshape(A_diff, (1, A_diff.shape[1], input_dim[0], input_dim[1]))
+        # kernel = torch.ones(eps[0], eps[1]).unsqueeze(0).unsqueeze(0)
+        # max_values = F.conv2d(result[0].unsqueeze(1), kernel)
+        # max_values_reduced = torch.max(max_values, dim=2)[0]
+        # max_values_reduced = torch.max(max_values_reduced, dim=2)[0]
+        # bound = center + sign * max_values_reduced.unsqueeze(0)
+        #
+        #
+        # return bound.squeeze(2)
+        return self.extract_info(A, eps, input_dim, sign, x)[2].squeeze(2)
+
+
+    def concretize_lower(self, x, A, bias):
+        sign = -1
+
+        input_dim = x[0].shape
+
+        eps = torch.ceil(self.eps)
+        center, max_values, _ = self.extract_info(A, eps, input_dim, sign, x)
+
+        thresh = center[0] + bias.t()
+        thresh_broadcasted = thresh.squeeze(0).unsqueeze(-1).unsqueeze(-1)
+        mv_adjusted = torch.clamp(max_values - thresh_broadcasted, min=0)
+
+        max_filter_kernel_size = (self.eps[0].item(), self.eps[1].item())
+        padding = (self.eps[0].item() - 1, self.eps[1].item() - 1)
+        padded_tensor = F.pad(mv_adjusted, (padding[1], padding[1], padding[0], padding[0]))
+        max_pooled = F.max_pool2d(padded_tensor, kernel_size=max_filter_kernel_size, stride=1)
+        max_pooled_reduced = torch.max(max_pooled.view(9, 28 * 28), dim=0)[0].view(28, 28)
+        locked_pixels_mask = max_pooled_reduced == 0
+        inputs = x.view(input_dim)
+        lower_adj = torch.where(locked_pixels_mask, inputs, torch.zeros_like(inputs))
+        upper_adj = torch.where(locked_pixels_mask, inputs, torch.ones_like(inputs))
+        dif = upper_adj - lower_adj
+
+        self.upper_values = upper_adj.unsqueeze(0)
+        self.lower_values = lower_adj.unsqueeze(0)
+        self.dif = torch.nonzero(dif.unsqueeze(0))
+
+        # return bound.squeeze(2) + bias
+        # return torch.nonzero(dif.view(28*28)).squeeze(1)
+        return self.dif
+
+    def extract_info(self, A, eps, input_dim, sign, x):
+        x = x.reshape(x.shape[0], -1, 1)
+        center = A.matmul(x)
+
+        x = x.reshape(x.shape[0], 1, -1)
+
+        original = A * x.expand(x.shape[0], A.shape[-2], x.shape[2])
+        neg_mask = A < 0
+        pos_mask = A >= 0
+
+        if sign == 1:
+            A_diff = torch.zeros_like(A)
+            # A_diff[pos_mask] = A[pos_mask] - original[pos_mask] # changes that one weight can contribute to the value
+            # A_diff[neg_mask] = - original[neg_mask]
+
+            A_diff[pos_mask] = (A * self.upper_values.view(1, 1, 28 * 28) - original)[pos_mask]
+            A_diff[neg_mask] = (A * self.lower_values.view(1, 1, 28 * 28) - original)[neg_mask]
+        else:
+            A_diff = torch.zeros_like(A)
+            # A_diff[pos_mask] = original[pos_mask]
+            # A_diff[neg_mask] = (original - A)[neg_mask]
+            A_diff[pos_mask] = (original - A * self.lower_values.view(1, 1, 28 * 28))[pos_mask]
+            A_diff[neg_mask] = (original - A * self.upper_values.view(1, 1, 28 * 28))[neg_mask]
+
+        # FIXME: this assumes the input pixel range is between 0 and 1!
+        # A_diff, _= torch.sort(A_diff, dim = 2, descending=True)
+        # bound = center + sign * A_diff[:, :, :eps].sum(dim = 2).unsqueeze(2) * self.ratio
+
+        result = torch.reshape(A_diff, (1, A_diff.shape[1], input_dim[0], input_dim[1]))
+        kernel = torch.ones(eps[0], eps[1]).unsqueeze(0).unsqueeze(0)
+        max_values = F.conv2d(result[0].unsqueeze(1), kernel)
+        max_values_reduced = torch.max(max_values, dim=2)[0]
+        max_values_reduced = torch.max(max_values_reduced, dim=2)[0]
+        bound = center + sign * max_values_reduced.unsqueeze(0)
+        return center, max_values, bound
+
+    def init(self, x, aux=None, forward=False):
+        # For other norms, we pass in the BoundedTensor objects directly.
+        x_L = x
+        x_U = x
+        if not forward:
+            return LinearBound(None, None, None, None, x_L, x_U), x, None
+        batch_size = x.shape[0]
+        dim = x.reshape(batch_size, -1).shape[-1]
+        eye = torch.eye(dim).to(x.device).unsqueeze(0).repeat(batch_size, 1, 1)
+        lw = eye.reshape(batch_size, dim, *x.shape[1:])
+        lb = torch.zeros_like(x).to(x.device)
+        uw, ub = lw.clone(), lb.clone()
+        return LinearBound(lw, lb, uw, ub, x_L, x_U), x, None
+
+    def __repr__(self):
+        return 'PerturbationLpNorm(norm=0, eps={})'.format(self.eps)
+
 
 
 class PerturbationLpNorm(Perturbation):

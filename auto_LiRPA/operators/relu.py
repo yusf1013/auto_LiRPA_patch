@@ -798,85 +798,85 @@ class BoundSignMerge(BoundTwoPieceLinear):
             ub_upper_d = torch.clamp(ub_upper_d, min=0) * no_mask
         return lb_lower_d, ub_lower_d, lb_upper_d, ub_upper_d
 
-    def _backward_relaxation(self, last_lA, last_uA, x, start_node, unstable_idx):
-        if x is not None:
-            lower, upper = x.lower, x.upper
-        else:
-            lower, upper = self.lower, self.upper
-
-        flag_expand = False
-        ub_lower_d = lb_lower_d = lb_upper_d = ub_upper_d = None
-        alpha_lookup_idx = None  # For sparse-spec alpha.
-        if self.opt_stage in ['opt', 'reuse']:
-            # Alpha-CROWN.
-            upper_d = lower_d = None
-            selected_alpha, alpha_lookup_idx = self.select_alpha_by_idx(last_lA, last_uA,
-                unstable_idx, start_node, alpha_lookup_idx)
-            # The first dimension is lower/upper intermediate bound.
-            if last_lA is not None:
-                lb_lower_d = selected_alpha[0]
-                lb_upper_d = selected_alpha[2]
-            if last_uA is not None:
-                ub_lower_d = selected_alpha[1]
-                ub_upper_d = selected_alpha[3]
-
-            if self.alpha_indices is not None:
-                # Sparse alpha on the hwc dimension. We store slopes for unstable neurons in this layer only.
-                # Recover to full alpha first.
-                sparse_alpha_shape = lb_lower_d.shape if lb_lower_d is not None else ub_lower_d.shape
-                full_alpha_shape = sparse_alpha_shape[:-1] + self.shape
-                if lb_lower_d is not None:
-                    lb_lower_d = self.reconstruct_full_alpha(
-                        lb_lower_d, full_alpha_shape, self.alpha_indices)
-                    lb_upper_d = self.reconstruct_full_alpha(
-                        lb_upper_d, full_alpha_shape, self.alpha_indices)
-                if ub_lower_d is not None:
-                    ub_lower_d = self.reconstruct_full_alpha(
-                        ub_lower_d, full_alpha_shape, self.alpha_indices)
-                    ub_upper_d = self.reconstruct_full_alpha(
-                        ub_upper_d, full_alpha_shape, self.alpha_indices)
-
-            # condition only on the masked part
-            if self.inputs[0].alpha_beta_update_mask is not None:
-                update_mask = self.inputs[0].alpha_beta_update_mask
-                if lb_lower_d is not None:
-                    lb_lower_d_new = lb_lower_d[:, update_mask]
-                    lb_upper_d_new = lb_upper_d[:, update_mask]
-                else:
-                    lb_lower_d_new = lb_upper_d_new = None
-                if ub_lower_d is not None:
-                    ub_lower_d_new = ub_lower_d[:, update_mask]
-                    ub_upper_d_new = ub_upper_d[:, update_mask]
-                else:
-                    ub_lower_d_new = ub_upper_d_new = None
-                lb_lower_d, ub_lower_d, lb_upper_d, ub_upper_d = self._mask_alpha(lower, upper,
-                    lb_lower_d_new, ub_lower_d_new, lb_upper_d_new, ub_upper_d_new)
-            else:
-                lb_lower_d, ub_lower_d, lb_upper_d, ub_upper_d = self._mask_alpha(lower, upper,
-                    lb_lower_d, ub_lower_d, lb_upper_d, ub_upper_d)
-            flag_expand = True  # we already have the spec dimension.
-        else:
-            lower_d = torch.zeros_like(upper, requires_grad=True)
-            upper_d = torch.zeros_like(upper, requires_grad=True)
-
-        mask_pos = (x.lower >= 0.).requires_grad_(False).to(x.lower.dtype)
-        mask_neg = (x.upper < 0.).requires_grad_(False).to(x.upper.dtype)
-        lower_b = (-1 * (1 - mask_pos) + mask_pos).unsqueeze(0)
-        upper_b = (-1 * mask_neg + (1 - mask_neg)).unsqueeze(0)
-
-        # Upper bound always needs an extra specification dimension, since they only depend on lb and ub.
-        if not flag_expand:
-            if self.opt_stage in ['opt', 'reuse']:
-                # We have different slopes for lower and upper bounds propagation.
-                lb_lower_d = lb_lower_d.unsqueeze(0) if last_lA is not None else None
-                ub_lower_d = ub_lower_d.unsqueeze(0) if last_uA is not None else None
-                lb_upper_d = lb_lower_d.unsqueeze(0) if last_lA is not None else None
-                ub_upper_d = ub_lower_d.unsqueeze(0) if last_uA is not None else None
-            else:
-                lower_d = lower_d.unsqueeze(0)
-                upper_d = upper_d.unsqueeze(0)
-        return (upper_d, upper_b, lower_d, lower_b, lb_lower_d, ub_lower_d,
-            lb_upper_d, ub_upper_d, alpha_lookup_idx)
+    # def _backward_relaxation(self, last_lA, last_uA, x, start_node, unstable_idx):
+    #     if x is not None:
+    #         lower, upper = x.lower, x.upper
+    #     else:
+    #         lower, upper = self.lower, self.upper
+    #
+    #     flag_expand = False
+    #     ub_lower_d = lb_lower_d = lb_upper_d = ub_upper_d = None
+    #     alpha_lookup_idx = None  # For sparse-spec alpha.
+    #     if self.opt_stage in ['opt', 'reuse']:
+    #         # Alpha-CROWN.
+    #         upper_d = lower_d = None
+    #         selected_alpha, alpha_lookup_idx = self.select_alpha_by_idx(last_lA, last_uA,
+    #             unstable_idx, start_node, alpha_lookup_idx)
+    #         # The first dimension is lower/upper intermediate bound.
+    #         if last_lA is not None:
+    #             lb_lower_d = selected_alpha[0]
+    #             lb_upper_d = selected_alpha[2]
+    #         if last_uA is not None:
+    #             ub_lower_d = selected_alpha[1]
+    #             ub_upper_d = selected_alpha[3]
+    #
+    #         if self.alpha_indices is not None:
+    #             # Sparse alpha on the hwc dimension. We store slopes for unstable neurons in this layer only.
+    #             # Recover to full alpha first.
+    #             sparse_alpha_shape = lb_lower_d.shape if lb_lower_d is not None else ub_lower_d.shape
+    #             full_alpha_shape = sparse_alpha_shape[:-1] + self.shape
+    #             if lb_lower_d is not None:
+    #                 lb_lower_d = self.reconstruct_full_alpha(
+    #                     lb_lower_d, full_alpha_shape, self.alpha_indices)
+    #                 lb_upper_d = self.reconstruct_full_alpha(
+    #                     lb_upper_d, full_alpha_shape, self.alpha_indices)
+    #             if ub_lower_d is not None:
+    #                 ub_lower_d = self.reconstruct_full_alpha(
+    #                     ub_lower_d, full_alpha_shape, self.alpha_indices)
+    #                 ub_upper_d = self.reconstruct_full_alpha(
+    #                     ub_upper_d, full_alpha_shape, self.alpha_indices)
+    #
+    #         # condition only on the masked part
+    #         if self.inputs[0].alpha_beta_update_mask is not None:
+    #             update_mask = self.inputs[0].alpha_beta_update_mask
+    #             if lb_lower_d is not None:
+    #                 lb_lower_d_new = lb_lower_d[:, update_mask]
+    #                 lb_upper_d_new = lb_upper_d[:, update_mask]
+    #             else:
+    #                 lb_lower_d_new = lb_upper_d_new = None
+    #             if ub_lower_d is not None:
+    #                 ub_lower_d_new = ub_lower_d[:, update_mask]
+    #                 ub_upper_d_new = ub_upper_d[:, update_mask]
+    #             else:
+    #                 ub_lower_d_new = ub_upper_d_new = None
+    #             lb_lower_d, ub_lower_d, lb_upper_d, ub_upper_d = self._mask_alpha(lower, upper,
+    #                 lb_lower_d_new, ub_lower_d_new, lb_upper_d_new, ub_upper_d_new)
+    #         else:
+    #             lb_lower_d, ub_lower_d, lb_upper_d, ub_upper_d = self._mask_alpha(lower, upper,
+    #                 lb_lower_d, ub_lower_d, lb_upper_d, ub_upper_d)
+    #         flag_expand = True  # we already have the spec dimension.
+    #     else:
+    #         lower_d = torch.zeros_like(upper, requires_grad=True)
+    #         upper_d = torch.zeros_like(upper, requires_grad=True)
+    #
+    #     mask_pos = (x.lower >= 0.).requires_grad_(False).to(x.lower.dtype)
+    #     mask_neg = (x.upper < 0.).requires_grad_(False).to(x.upper.dtype)
+    #     lower_b = (-1 * (1 - mask_pos) + mask_pos).unsqueeze(0)
+    #     upper_b = (-1 * mask_neg + (1 - mask_neg)).unsqueeze(0)
+    #
+    #     # Upper bound always needs an extra specification dimension, since they only depend on lb and ub.
+    #     if not flag_expand:
+    #         if self.opt_stage in ['opt', 'reuse']:
+    #             # We have different slopes for lower and upper bounds propagation.
+    #             lb_lower_d = lb_lower_d.unsqueeze(0) if last_lA is not None else None
+    #             ub_lower_d = ub_lower_d.unsqueeze(0) if last_uA is not None else None
+    #             lb_upper_d = lb_lower_d.unsqueeze(0) if last_lA is not None else None
+    #             ub_upper_d = ub_lower_d.unsqueeze(0) if last_uA is not None else None
+    #         else:
+    #             lower_d = lower_d.unsqueeze(0)
+    #             upper_d = upper_d.unsqueeze(0)
+    #     return (upper_d, upper_b, lower_d, lower_b, lb_lower_d, ub_lower_d,
+    #         lb_upper_d, ub_upper_d, alpha_lookup_idx)
 
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
 
