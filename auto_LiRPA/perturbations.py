@@ -97,7 +97,7 @@ class PerturbationL0Norm(Perturbation):
 
         if sign == 1:
             A_diff = torch.zeros_like(A)
-            A_diff[pos_mask] = A[pos_mask] - original[pos_mask]# changes that one weight can contribute to the value
+            A_diff[pos_mask] = A[pos_mask] - original[pos_mask]  # changes that one weight can contribute to the value
             A_diff[neg_mask] = - original[neg_mask]
         else:
             A_diff = torch.zeros_like(A)
@@ -105,9 +105,9 @@ class PerturbationL0Norm(Perturbation):
             A_diff[neg_mask] = original[neg_mask] - A[neg_mask]
 
         # FIXME: this assumes the input pixel range is between 0 and 1!
-        A_diff, _= torch.sort(A_diff, dim = 2, descending=True)
+        A_diff, _ = torch.sort(A_diff, dim=2, descending=True)
 
-        bound = center + sign * A_diff[:, :, :eps].sum(dim = 2).unsqueeze(2) * self.ratio
+        bound = center + sign * A_diff[:, :, :eps].sum(dim=2).unsqueeze(2) * self.ratio
 
         return bound.squeeze(2)
 
@@ -141,7 +141,7 @@ class PerturbationL0NormPatch(Perturbation):
         self.x_L = x_L
         self.lower_values = torch.zeros_like(image)
         self.upper_values = torch.ones_like(image)
-        self.dif = torch.nonzero(torch.ones_like(image))
+        self.dif = torch.nonzero(torch.ones_like(image)).size(0)
 
     def concretize(self, x, A, sign=-1, aux=None):
         if A is None:
@@ -189,37 +189,140 @@ class PerturbationL0NormPatch(Perturbation):
         # return bound.squeeze(2)
         return self.extract_info(A, eps, input_dim, sign, x)[2].squeeze(2)
 
+    # def concretize_lower(self, x, A, bias):
+    #     sign = -1
+    #
+    #     input_dim = x[0].shape
+    #
+    #     eps = torch.ceil(self.eps)
+    #     center, max_values, _ = self.extract_info(A, eps, input_dim, sign, x)
+    #     inputs = x.view(input_dim)
+    #
+    #     thresh = center[0] + bias.t()
+    #     thresh_broadcasted = thresh.squeeze(0).unsqueeze(-1).unsqueeze(-1)
+    #     mv_adjusted = torch.clamp(max_values - thresh_broadcasted, min=0)
+    #
+    #     # max_filter_kernel_size = (self.eps[0].item(), self.eps[1].item())
+    #     # padding = (self.eps[0].item() - 1, self.eps[1].item() - 1)
+    #     # padded_tensor = F.pad(mv_adjusted, (padding[1], padding[1], padding[0], padding[0]))
+    #     # max_pooled = F.max_pool2d(padded_tensor, kernel_size=max_filter_kernel_size, stride=1)
+    #     # max_pooled_reduced = torch.max(max_pooled.view(9, 28 * 28), dim=0)[0].view(28, 28)
+    #     # locked_pixels_mask = max_pooled_reduced == 0
+    #     # inputs = x.view(input_dim)
+    #     # lower_adj = torch.where(locked_pixels_mask, inputs, torch.zeros_like(inputs))
+    #     # upper_adj = torch.where(locked_pixels_mask, inputs, torch.ones_like(inputs))
+    #     # dif = upper_adj - lower_adj
+    #
+    #     mv_reduced = torch.max(mv_adjusted.view(mv_adjusted.size(0), mv_adjusted.size(-1)*mv_adjusted.size(-2)), dim=0)[0].view(mv_adjusted.size(-2), mv_adjusted.size(-1))
+    #     dif, lower_adj, upper_adj = self.get_upper_lower_dif(inputs, mv_reduced)
+    #
+    #     self.upper_values = upper_adj.unsqueeze(0)
+    #     self.lower_values = lower_adj.unsqueeze(0)
+    #     # self.dif = torch.nonzero(dif.unsqueeze(0))
+    #
+    #     # return bound.squeeze(2) + bias
+    #     # return torch.nonzero(dif.view(28*28)).squeeze(1)
+    #     return self.dif
 
-    def concretize_lower(self, x, A, bias):
+    def get_average(self):
+        return (self.upper_values + self.lower_values ) / 2
+
+
+    def partition_input(self, x, A, bias):
+        input_dim = x[0].shape
+
+        eps = torch.ceil(self.eps)
+        center, max_values, _ = self.extract_info(A, eps, input_dim, -1, x)
+        inputs = x.view(input_dim)
+
+        thresh = center[0] + bias.t()
+        thresh_broadcasted = thresh.squeeze(0).unsqueeze(-1).unsqueeze(-1)
+        mv_adjusted = torch.clamp(max_values - thresh_broadcasted, min=0)
+        mv_reduced = \
+        torch.max(mv_adjusted.view(mv_adjusted.size(0), mv_adjusted.size(-1) * mv_adjusted.size(-2)), dim=0)[0].view(
+            mv_adjusted.size(-2), mv_adjusted.size(-1))
+
+        max_filter_kernel_size = (self.eps[0].item(), self.eps[1].item())
+        padding = (self.eps[0].item() - 1, self.eps[1].item() - 1)
+        padded_tensor = F.pad(mv_reduced, (padding[1], padding[1], padding[0], padding[0]))
+        max_pooled = F.max_pool2d(padded_tensor.unsqueeze(0), kernel_size=max_filter_kernel_size, stride=1)[0]
+
+        if torch.nonzero(mv_adjusted).size(0) > 1:
+            raise ValueError("More than one patch is unlocked")
+
+        working_idx = torch.nonzero(mv_adjusted)[0][0].item()
+        weight = A.squeeze()[working_idx].view(input_dim)
+        ratio = max_pooled / weight
+        upper_values = self.upper_values.squeeze().clone()
+        lower_values = self.lower_values.squeeze().clone()
+
+        mask_less_than_0 = (ratio < 0)
+        mask_greater_than_0 = (ratio > 0)
+        lower_values[mask_less_than_0] = torch.max(upper_values + ratio, lower_values)[mask_less_than_0]
+        upper_values[mask_greater_than_0] = torch.min(lower_values + ratio, upper_values)[mask_greater_than_0]
+        average = (upper_values + lower_values) / 2
+        # dif = torch.nonzero(mv_reduced).size(0)
+
+        ptb = PerturbationL0NormPatch(self.eps, average.unsqueeze(0))
+        ptb.lower_values = lower_values.unsqueeze(0)
+        ptb.upper_values = upper_values.unsqueeze(0)
+        ptb.dif = 1
+
+        return ptb, average.unsqueeze(0)
+
+    def get_upper_lower_dif(self, inputs, mv_reduced):
+        max_filter_kernel_size = (self.eps[0].item(), self.eps[1].item())
+        padding = (self.eps[0].item() - 1, self.eps[1].item() - 1)
+        padded_tensor = F.pad(mv_reduced, (padding[1], padding[1], padding[0], padding[0]))
+        max_pooled = F.max_pool2d(padded_tensor.unsqueeze(0), kernel_size=max_filter_kernel_size, stride=1)[0]
+        locked_pixels_mask = max_pooled == 0
+        lower_adj = torch.where(locked_pixels_mask, inputs, torch.zeros_like(inputs))
+        upper_adj = torch.where(locked_pixels_mask, inputs, torch.ones_like(inputs))
+        # dif = upper_adj - lower_adj
+        dif = torch.nonzero(mv_reduced).size(0)
+        return dif, lower_adj, upper_adj
+
+    def split(self, x, A, bias):
+        ptb3 = None
+        avg = None
         sign = -1
 
         input_dim = x[0].shape
 
         eps = torch.ceil(self.eps)
         center, max_values, _ = self.extract_info(A, eps, input_dim, sign, x)
+        inputs = x.view(input_dim)
 
         thresh = center[0] + bias.t()
         thresh_broadcasted = thresh.squeeze(0).unsqueeze(-1).unsqueeze(-1)
         mv_adjusted = torch.clamp(max_values - thresh_broadcasted, min=0)
+        mv_reduced = \
+        torch.max(mv_adjusted.view(mv_adjusted.size(0), mv_adjusted.size(-1) * mv_adjusted.size(-2)), dim=0)[0].view(
+            mv_adjusted.size(-2), mv_adjusted.size(-1))
+        non_zero_list = torch.nonzero(mv_reduced)
+        non_zero_list = non_zero_list[:non_zero_list.size(0) // 2]
+        first_half = torch.zeros_like(mv_reduced)
+        row_indices = non_zero_list[:, 0]
+        col_indices = non_zero_list[:, 1]
+        first_half[row_indices, col_indices] = mv_reduced[row_indices, col_indices]
+        second_half = mv_reduced - first_half
 
-        max_filter_kernel_size = (self.eps[0].item(), self.eps[1].item())
-        padding = (self.eps[0].item() - 1, self.eps[1].item() - 1)
-        padded_tensor = F.pad(mv_adjusted, (padding[1], padding[1], padding[0], padding[0]))
-        max_pooled = F.max_pool2d(padded_tensor, kernel_size=max_filter_kernel_size, stride=1)
-        max_pooled_reduced = torch.max(max_pooled.view(9, 28 * 28), dim=0)[0].view(28, 28)
-        locked_pixels_mask = max_pooled_reduced == 0
-        inputs = x.view(input_dim)
-        lower_adj = torch.where(locked_pixels_mask, inputs, torch.zeros_like(inputs))
-        upper_adj = torch.where(locked_pixels_mask, inputs, torch.ones_like(inputs))
-        dif = upper_adj - lower_adj
+        dif, lower_adj, upper_adj = self.get_upper_lower_dif(inputs, first_half)
+        ptb1 = PerturbationL0NormPatch(self.eps, x)
+        ptb1.lower_values = lower_adj.unsqueeze(0)
+        ptb1.upper_values = upper_adj.unsqueeze(0)
+        ptb1.dif = dif
 
-        self.upper_values = upper_adj.unsqueeze(0)
-        self.lower_values = lower_adj.unsqueeze(0)
-        self.dif = torch.nonzero(dif.unsqueeze(0))
+        dif, lower_adj, upper_adj = self.get_upper_lower_dif(inputs, second_half)
+        ptb2 = PerturbationL0NormPatch(self.eps, x)
+        ptb2.lower_values = lower_adj.unsqueeze(0)
+        ptb2.upper_values = upper_adj.unsqueeze(0)
+        ptb2.dif = dif
 
-        # return bound.squeeze(2) + bias
-        # return torch.nonzero(dif.view(28*28)).squeeze(1)
-        return self.dif
+        if self.dif == 1 and (ptb1.dif == 1 or ptb2.dif == 1):
+            ptb3, avg = self.partition_input(x, A, bias)
+
+        return ptb1, ptb2, ptb3, avg
 
     def extract_info(self, A, eps, input_dim, sign, x):
         x = x.reshape(x.shape[0], -1, 1)
@@ -275,9 +378,9 @@ class PerturbationL0NormPatch(Perturbation):
         return 'PerturbationLpNorm(norm=0, eps={})'.format(self.eps)
 
 
-
 class PerturbationLpNorm(Perturbation):
     """Perturbation constrained by the L_p norm."""
+
     def __init__(self, eps=0, norm=np.inf, x_L=None, x_U=None, eps_min=0):
         self.eps = eps
         self.eps_min = eps_min
@@ -365,7 +468,7 @@ class PerturbationLpNorm(Perturbation):
                     A.unstable_idx)
                 # Note that we should avoid reshape the matrix.
                 # Due to padding, matrix cannot be reshaped without copying.
-                deviation = matrix.norm(p=self.dual_norm, dim=(-3,-2,-1)) * self.eps
+                deviation = matrix.norm(p=self.dual_norm, dim=(-3, -2, -1)) * self.eps
                 # Bound has shape (batch, out_c * out_h * out_w) or (batch, unstable_size).
                 bound = torch.einsum('bschw,bchw->bs', matrix, x) + sign * deviation
                 if A.unstable_idx is None:
@@ -394,7 +497,7 @@ class PerturbationLpNorm(Perturbation):
         batch_size = x_L.shape[0]
         perturbed = (x_U > x_L).int()
         logger.debug(f'Perturbed: {perturbed.sum()}')
-        lb = ub = x_L * (1 - perturbed) # x_L=x_U holds when perturbed=0
+        lb = ub = x_L * (1 - perturbed)  # x_L=x_U holds when perturbed=0
         perturbed = perturbed.view(batch_size, -1)
         index = torch.cumsum(perturbed, dim=-1)
         dim = max(perturbed.view(batch_size, -1).sum(dim=-1).max(), 1)
@@ -474,7 +577,7 @@ class PerturbationSynonym(Perturbation):
         self.train = train
 
     def concretize(self, x, A, sign, aux):
-        assert(self.model is not None)
+        assert (self.model is not None)
 
         x_rep, mask, can_be_replaced = aux
         batch_size, length, dim_word = x.shape[0], x.shape[1], x.shape[2]
@@ -559,8 +662,8 @@ class PerturbationSynonym(Perturbation):
 
     def init(self, x, aux=None, forward=False):
         tokens, batch = aux
-        self.tokens = tokens # DEBUG
-        assert(len(x.shape) == 3)
+        self.tokens = tokens  # DEBUG
+        assert (len(x.shape) == 3)
         batch_size, length, dim_word = x.shape[0], x.shape[1], x.shape[2]
 
         max_pos = 1
@@ -629,7 +732,7 @@ class PerturbationSynonym(Perturbation):
                 x_rep_ += x_rep[t][i] + [zeros] * (max_num_cand - len(x_rep[t][i]))
                 mask += [1] * len(x_rep[t][i]) + [0] * (max_num_cand - len(x_rep[t][i]))
         x_rep_ = torch.cat(x_rep_).reshape(batch_size, length, max_num_cand, dim_word)
-        mask = torch.tensor(mask, dtype=torch.get_default_dtype(), device=x.device)\
+        mask = torch.tensor(mask, dtype=torch.get_default_dtype(), device=x.device) \
             .reshape(batch_size, length, max_num_cand)
         x_rep_ = x_rep_ * self.eps + x.unsqueeze(2) * (1 - self.eps)
 
@@ -656,4 +759,3 @@ class PerturbationSynonym(Perturbation):
                         _cand = [tokens[i]] + _cand
                     candidates.append(_cand)
                 example['candidates'] = candidates
-

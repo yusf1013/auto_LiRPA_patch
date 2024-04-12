@@ -67,60 +67,80 @@ def run_verification(model, image, ptb, true_label):
                     j=j, l=lb[i][j].item(), u=ub[i][j].item(), ind=indicator, true_label=true_label.item()))
         print()
 
-        return ptb.concretize_lower(image, lower_A.view(1, 9, 28 * 28), lower_bias)
+        # return ptb.concretize_lower(image, lower_A.view(1, 9, 28 * 28), lower_bias)
+        return ptb.split(image, lower_A.view(1, 9, 28 * 28), lower_bias)
 
 
 def run_recursive_verification(model, image, ptb, true_label, eps):
-    previous_result = ptb.dif
-    res = run_verification(model=model, image=image, ptb=ptb, true_label=true_label)
-    print(res)
-    if len(res) == 0:
-        return True
-    elif previous_result.size() == res.size() and previous_result == res:
-        return False
-
-    num_rows = res.size(0)
-    split_index = num_rows // 2
-    first_half = res[:split_index].clone()
-    second_half = res[split_index:].clone()
-
-    ptb_first_half = PerturbationL0NormPatch(eps=eps, image=image)
-    ptb_first_half.lower_values = image.clone()
-    ptb_first_half.upper_values = image.clone()
-    row_indices = first_half[:, 1]
-    col_indices = first_half[:, 2]
-    ptb_first_half.lower_values[0][row_indices, col_indices] = ptb.lower_values[0][row_indices, col_indices]
-    ptb_first_half.upper_values[0][row_indices, col_indices] = ptb.upper_values[0][row_indices, col_indices]
-    ptb_first_half.dif = first_half
-
-    # Do the same with second_half
-    ptb_second_half = PerturbationL0NormPatch(eps=eps, image=image)
-    ptb_second_half.lower_values = image.clone()
-    ptb_second_half.upper_values = image.clone()
-    row_indices = second_half[:, 1]
-    col_indices = second_half[:, 2]
-    ptb_second_half.lower_values[0][row_indices, col_indices] = ptb.lower_values[0][row_indices, col_indices]
-    ptb_second_half.upper_values[0][row_indices, col_indices] = ptb.upper_values[0][row_indices, col_indices]
-    ptb_second_half.dif = second_half
-
-    # res = run_verification(model=model, image=image, ptb=ptb_first_half, true_label=true_label)
+    # previous_result = ptb.dif
+    # res = run_verification(model=model, image=image, ptb=ptb, true_label=true_label)
     # print(res)
-    first_result = run_recursive_verification(model, image, ptb_first_half, true_label, eps)
-    if not first_result:
-        return False
-    second_result = run_recursive_verification(model, image, ptb_second_half, true_label, eps)
-    return second_result
+    # if len(res) == 0:
+    #     return True
+    # elif previous_result.size() == res.size() and previous_result == res:
+    #     return False
+    #
+    # num_rows = res.size(0)
+    # split_index = num_rows // 2
+    # first_half = res[:split_index].clone()
+    # second_half = res[split_index:].clone()
+    #
+    # ptb_first_half = PerturbationL0NormPatch(eps=eps, image=image)
+    # ptb_first_half.lower_values = image.clone()
+    # ptb_first_half.upper_values = image.clone()
+    # row_indices = first_half[:, 1]
+    # col_indices = first_half[:, 2]
+    # ptb_first_half.lower_values[0][row_indices, col_indices] = ptb.lower_values[0][row_indices, col_indices]
+    # ptb_first_half.upper_values[0][row_indices, col_indices] = ptb.upper_values[0][row_indices, col_indices]
+    # ptb_first_half.dif = first_half
+    #
+    # # Do the same with second_half
+    # ptb_second_half = PerturbationL0NormPatch(eps=eps, image=image)
+    # ptb_second_half.lower_values = image.clone()
+    # ptb_second_half.upper_values = image.clone()
+    # row_indices = second_half[:, 1]
+    # col_indices = second_half[:, 2]
+    # ptb_second_half.lower_values[0][row_indices, col_indices] = ptb.lower_values[0][row_indices, col_indices]
+    # ptb_second_half.upper_values[0][row_indices, col_indices] = ptb.upper_values[0][row_indices, col_indices]
+    # ptb_second_half.dif = second_half
+    #
+    # # res = run_verification(model=model, image=image, ptb=ptb_first_half, true_label=true_label)
+    # # print(res)
+    # first_result = run_recursive_verification(model, image, ptb_first_half, true_label, eps)
+    # if not first_result:
+    #     return False
+    # second_result = run_recursive_verification(model, image, ptb_second_half, true_label, eps)
+    # return second_result
+
+    ptb1, ptb2, ptb3, avg = run_verification(model=model, image=image, ptb=ptb, true_label=true_label)
+    if ptb1.dif == 0 and ptb2.dif == 0:
+        return True
+    if ptb.dif == 1 and (ptb1.dif == 1 or ptb2.dif == 1):
+        new_prediction = torch.argmax(model(avg))
+        if new_prediction != true_label:
+            return False
+        elif torch.argmax(model(ptb3.lower_values)) != true_label:
+            return False
+        elif torch.argmax(model(ptb3.upper_values)) != true_label:
+            return False
+        else:
+            return run_recursive_verification(model, avg, ptb3, true_label, eps)
+    return run_recursive_verification(model, image, ptb1, true_label, eps) and run_recursive_verification(model, image, ptb2, true_label, eps)
 
 
 def main():
+    safe = []
+    unsafe = []
     # global model, N, image, true_label, lirpa_model, eps, norm, ptb
     ## Step 1: Define computational graph by implementing forward()
     # This simple model comes from https://github.com/locuslab/convex_adversarial
     loaded_model = tm.model
     loaded_model.load_state_dict(torch.load('pytorch_model.pth'))
+
     # loaded_model = tm.mnist_6_200()
     # loaded_model.load_state_dict(torch.load('mnist_6_200_nat.pth')['state_dict'][0])
     # loaded_model = tm.ModifiedModel(loaded_model, 6)
+
     # loaded_model = tm.Simple3NN()
     # loaded_model = tm.ModifiedModel(loaded_model, 2)
     loaded_model.eval()
@@ -130,30 +150,29 @@ def main():
         './data', train=False, download=True,
         transform=torchvision.transforms.ToTensor())
     # For illustration we only use 2 image from dataset
-    N = 1
-    image = test_data.data[:N].view(N, 1, 28, 28)[0]
-    image = image.to(torch.float32) / 255.0
-    # image = torch.tensor([[1.0, 2.0, 3.0]])
-    # image = torch.tensor([[1/6.0, 2.0/6.0, 3.0/6.0]])
-    # image = torch.tensor([[0.2, 0.3, 0.5]])
-    # true_label = test_data.targets[:N]
-    true_label = torch.argmax(loaded_model(image)).unsqueeze(0)
-    if torch.cuda.is_available():
-        image = image.cuda()
-        model = model.cuda()
-    ## Step 3: wrap model with auto_LiRPA
-    # The second parameter is for constructing the trace of the computational graph,
-    # and its content is not important.
-    print('Running on', image.device)
-    eps = torch.tensor([2, 2])
-    ## Step 4: Compute bounds using LiRPA given a perturbation
-    # eps = 2
-    # norm = 1
-    # ptb = PerturbationLpNorm(norm=norm, eps=eps)
-    # ptb = PerturbationL0Norm(eps=eps)
-    ptb = PerturbationL0NormPatch(eps=eps, image=image)
-    result = run_recursive_verification(model, image, ptb, true_label, eps)
-    print(result)
+    # N = 12
+    # images = test_data.data[12:25].view(N, 1, 28, 28)
+    images = test_data.data.unsqueeze(1)
+    for i, image in enumerate(images[15:16]):
+        image = image.to(torch.float32) / 255.0
+
+        true_label = torch.argmax(loaded_model(image)).unsqueeze(0)
+        if torch.cuda.is_available():
+            image = image.cuda()
+            model = model.cuda()
+
+        print('Running on', image.device)
+        eps = torch.tensor([2, 2])
+        ptb = PerturbationL0NormPatch(eps=eps, image=image)
+        result = run_recursive_verification(model, image, ptb, true_label, eps)
+        print(result)
+        if result:
+            safe.append(i)
+        else:
+            unsafe.append(i)
+
+    print(f"Safe: {safe}")
+    print(f"Unsafe: {unsafe}")
 
 
 main()
