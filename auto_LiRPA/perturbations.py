@@ -263,17 +263,19 @@ class PerturbationL0NormPatch(Perturbation):
         lower_values = self.lower_values.squeeze().clone()
 
         if torch.nonzero(mv_adjusted).size(0) > 1:
-            raise ValueError("More than one patch is unlocked")
+            # raise ValueError("More than one patch is unlocked")
+            print("More than one patch is unlocked")
+        else:
+            working_idx = torch.nonzero(mv_adjusted)[0][0].item()
+            weight = A.squeeze()[working_idx].view(input_dim)
+            ratio = max_pooled / weight
 
-        working_idx = torch.nonzero(mv_adjusted)[0][0].item()
-        weight = A.squeeze()[working_idx].view(input_dim)
-        ratio = max_pooled / weight
 
+            mask_less_than_0 = (ratio < 0)
+            mask_greater_than_0 = (ratio > 0)
+            lower_values[mask_less_than_0] = torch.max(upper_values + ratio, lower_values)[mask_less_than_0]
+            upper_values[mask_greater_than_0] = torch.min(lower_values + ratio, upper_values)[mask_greater_than_0]
 
-        mask_less_than_0 = (ratio < 0)
-        mask_greater_than_0 = (ratio > 0)
-        lower_values[mask_less_than_0] = torch.max(upper_values + ratio, lower_values)[mask_less_than_0]
-        upper_values[mask_greater_than_0] = torch.min(lower_values + ratio, upper_values)[mask_greater_than_0]
         average = (upper_values + lower_values) / 2
         # dif = torch.nonzero(mv_reduced).size(0)
 
@@ -283,6 +285,7 @@ class PerturbationL0NormPatch(Perturbation):
 
         mid = upper_values.clone()
         mid[max_difference_coords[0], max_difference_coords[1]] = average[max_difference_coords[0], max_difference_coords[1]]
+
         ptb = PerturbationL0NormPatch(self.eps, x, self.unlocked_patches)
         ptb.lower_values = lower_values.unsqueeze(0)
         ptb.upper_values = mid.unsqueeze(0)

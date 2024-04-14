@@ -41,12 +41,12 @@ def run_verification(model, image, ptb, true_label):
     pred = lirpa_model(image)
     label = torch.argmax(pred, dim=1).cpu().detach().numpy()
     n_classes = pred.shape[1]
-    print('Demonstration 1: Bound computation and comparisons of different methods.\n')
+    # print('Demonstration 1: Bound computation and comparisons of different methods.\n')
     required_A = defaultdict(set)
     required_A[lirpa_model.output_name[0]].add(lirpa_model.input_name[0])
     C = get_adjustment_matrix(n_classes, true_label.item()).unsqueeze(0)
     for method in ["backward (CROWN)"]:
-        print('Bounding method:', method)
+        # print('Bounding method:', method)
 
         # start_time = time.time()
         lb, ub, A_dict = lirpa_model.compute_bounds(x=(image,), method=method.split()[0], C=C, return_A=True,
