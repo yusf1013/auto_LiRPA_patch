@@ -48,30 +48,30 @@ def run_verification(model, image, ptb, true_label):
     for method in ["backward (CROWN)"]:
         print('Bounding method:', method)
 
-        start_time = time.time()
+        # start_time = time.time()
         lb, ub, A_dict = lirpa_model.compute_bounds(x=(image,), method=method.split()[0], C=C, return_A=True,
                                                     needed_A_dict=required_A)
-        print("Finished in {:.3f}s".format(time.time() - start_time))
+        # print("Finished in {:.3f}s".format(time.time() - start_time))
 
         lower_A, lower_bias = A_dict[lirpa_model.output_name[0]][lirpa_model.input_name[0]]['lA'], \
             A_dict[lirpa_model.output_name[0]][lirpa_model.input_name[0]]['lbias']
         upper_A, upper_bias = A_dict[lirpa_model.output_name[0]][lirpa_model.input_name[0]]['uA'], \
             A_dict[lirpa_model.output_name[0]][lirpa_model.input_name[0]]['ubias']
 
-        # n_classes = len(lb[0])
-        for i in range(N):
-            print(f'Image {i} top-1 prediction {label[i]} ground-truth {true_label[i]}')
-            for j in range(len(lb[0])):
-                indicator = '(ground-truth)' if j == true_label[i] else ''
-                print('f_{j}(x_0): {l:8.3f} <= f_{true_label}(x_0+delta) - f_{j}(x_0+delta) <= {u:8.3f} {ind}'.format(
-                    j=j, l=lb[i][j].item(), u=ub[i][j].item(), ind=indicator, true_label=true_label.item()))
-        print()
+        # # n_classes = len(lb[0])
+        # for i in range(N):
+        #     print(f'Image {i} top-1 prediction {label[i]} ground-truth {true_label[i]}')
+        #     for j in range(len(lb[0])):
+        #         indicator = '(ground-truth)' if j == true_label[i] else ''
+        #         print('f_{j}(x_0): {l:8.3f} <= f_{true_label}(x_0+delta) - f_{j}(x_0+delta) <= {u:8.3f} {ind}'.format(
+        #             j=j, l=lb[i][j].item(), u=ub[i][j].item(), ind=indicator, true_label=true_label.item()))
+        # print()
 
         # return ptb.concretize_lower(image, lower_A.view(1, 9, 28 * 28), lower_bias)
         return ptb.split(image, lower_A.view(1, 9, 28 * 28), lower_bias)
 
 
-def run_recursive_verification(model, image, ptb, true_label, eps):
+def run_recursive_verification(model, image, ptb, true_label, eps, depth=0):
     # previous_result = ptb.dif
     # res = run_verification(model=model, image=image, ptb=ptb, true_label=true_label)
     # print(res)
@@ -112,20 +112,22 @@ def run_recursive_verification(model, image, ptb, true_label, eps):
     # second_result = run_recursive_verification(model, image, ptb_second_half, true_label, eps)
     # return second_result
 
-    ptb1, ptb2, ptb3, avg = run_verification(model=model, image=image, ptb=ptb, true_label=true_label)
+    start_time = time.time()
+    ptb1, ptb2, ptb3, ptb4 = run_verification(model=model, image=image, ptb=ptb, true_label=true_label)
+    print("Finished in {:.3f}s".format(time.time() - start_time))
+
     if ptb1.dif == 0 and ptb2.dif == 0:
         return True
     if ptb.dif == 1 and (ptb1.dif == 1 or ptb2.dif == 1):
-        new_prediction = torch.argmax(model(avg))
-        if new_prediction != true_label:
+        if torch.argmax(model(ptb3.get_average())) != true_label:
             return False
         elif torch.argmax(model(ptb3.lower_values)) != true_label:
             return False
         elif torch.argmax(model(ptb3.upper_values)) != true_label:
             return False
         else:
-            return run_recursive_verification(model, avg, ptb3, true_label, eps)
-    return run_recursive_verification(model, image, ptb1, true_label, eps) and run_recursive_verification(model, image, ptb2, true_label, eps)
+            return run_recursive_verification(model, ptb3.get_average(), ptb3, true_label, eps, depth=depth+1) and run_recursive_verification(model, ptb4.get_average(), ptb4, true_label, eps, depth=depth+1)
+    return run_recursive_verification(model, image, ptb1, true_label, eps, depth=depth+1) and run_recursive_verification(model, image, ptb2, true_label, eps, depth=depth+1)
 
 
 def main():
@@ -137,8 +139,8 @@ def main():
     loaded_model = tm.model
     loaded_model.load_state_dict(torch.load('pytorch_model.pth'))
 
-    # loaded_model = tm.mnist_6_200()
-    # loaded_model.load_state_dict(torch.load('mnist_6_200_nat.pth')['state_dict'][0])
+    loaded_model = tm.mnist_6_200()
+    loaded_model.load_state_dict(torch.load('mnist_6_200_nat.pth')['state_dict'][0])
     # loaded_model = tm.ModifiedModel(loaded_model, 6)
 
     # loaded_model = tm.Simple3NN()
@@ -153,7 +155,9 @@ def main():
     # N = 12
     # images = test_data.data[12:25].view(N, 1, 28, 28)
     images = test_data.data.unsqueeze(1)
-    for i, image in enumerate(images[15:16]):
+    total_time = 0
+    for i, image in enumerate(images[2:3]):
+        print("Starting image", i)
         image = image.to(torch.float32) / 255.0
 
         true_label = torch.argmax(loaded_model(image)).unsqueeze(0)
@@ -163,8 +167,15 @@ def main():
 
         print('Running on', image.device)
         eps = torch.tensor([2, 2])
-        ptb = PerturbationL0NormPatch(eps=eps, image=image)
+        input_dim = torch.tensor(image[0].size())
+        number_of_patches = input_dim - eps + torch.ones_like(eps)
+        unlocked_patches = torch.ones(number_of_patches.tolist())
+
+        ptb = PerturbationL0NormPatch(eps=eps, image=image, unlocked_patches=unlocked_patches)
+        start_time = time.time()
         result = run_recursive_verification(model, image, ptb, true_label, eps)
+        total_time += time.time() - start_time
+        print("Finished FULL IMAGE in {:.3f}s".format(time.time() - start_time))
         print(result)
         if result:
             safe.append(i)
@@ -173,6 +184,7 @@ def main():
 
     print(f"Safe: {safe}")
     print(f"Unsafe: {unsafe}")
+    print(f"Total time: {total_time}")
 
 
 main()

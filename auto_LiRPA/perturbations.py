@@ -135,13 +135,20 @@ class PerturbationL0NormPatch(Perturbation):
     Assuming input data is in the range of 0-1.
     """
 
-    def __init__(self, eps, image, x_L=None, x_U=None):
+    def __init__(self, eps, image, unlocked_patches, x_L=None, x_U=None):
         self.eps = eps
         self.x_U = x_U
         self.x_L = x_L
         self.lower_values = torch.zeros_like(image)
         self.upper_values = torch.ones_like(image)
         self.dif = torch.nonzero(torch.ones_like(image)).size(0)
+        self.unlocked_patches = unlocked_patches
+
+
+    # def find_unlocked_patches(self, x, A, bias):
+    #     difference = self.upper_values - self.lower_values
+    #     kernel =
+
 
     def concretize(self, x, A, sign=-1, aux=None):
         if A is None:
@@ -235,17 +242,25 @@ class PerturbationL0NormPatch(Perturbation):
         center, max_values, _ = self.extract_info(A, eps, input_dim, -1, x)
         inputs = x.view(input_dim)
 
-        thresh = center[0] + bias.t()
-        thresh_broadcasted = thresh.squeeze(0).unsqueeze(-1).unsqueeze(-1)
-        mv_adjusted = torch.clamp(max_values - thresh_broadcasted, min=0)
-        mv_reduced = \
-        torch.max(mv_adjusted.view(mv_adjusted.size(0), mv_adjusted.size(-1) * mv_adjusted.size(-2)), dim=0)[0].view(
-            mv_adjusted.size(-2), mv_adjusted.size(-1))
+        # # experimental 3
+        # thresh = center[0] + bias.t()
+        # thresh_broadcasted = thresh.squeeze(0).unsqueeze(-1).unsqueeze(-1)
+        #
+        # mv_adjusted = torch.clamp(max_values - thresh_broadcasted, min=0)
+        # mv_reduced = \
+        # torch.max(mv_adjusted.view(mv_adjusted.size(0), mv_adjusted.size(-1) * mv_adjusted.size(-2)), dim=0)[0].view(
+        #     mv_adjusted.size(-2), mv_adjusted.size(-1))
+        # mv_reduced = self.unlocked_patches
+
+        mv_adjusted, mv_reduced = self.get_mv_adjusted_and_reduced(bias, center, max_values)
 
         max_filter_kernel_size = (self.eps[0].item(), self.eps[1].item())
         padding = (self.eps[0].item() - 1, self.eps[1].item() - 1)
         padded_tensor = F.pad(mv_reduced, (padding[1], padding[1], padding[0], padding[0]))
         max_pooled = F.max_pool2d(padded_tensor.unsqueeze(0), kernel_size=max_filter_kernel_size, stride=1)[0]
+
+        upper_values = self.upper_values.squeeze().clone()
+        lower_values = self.lower_values.squeeze().clone()
 
         if torch.nonzero(mv_adjusted).size(0) > 1:
             raise ValueError("More than one patch is unlocked")
@@ -253,8 +268,7 @@ class PerturbationL0NormPatch(Perturbation):
         working_idx = torch.nonzero(mv_adjusted)[0][0].item()
         weight = A.squeeze()[working_idx].view(input_dim)
         ratio = max_pooled / weight
-        upper_values = self.upper_values.squeeze().clone()
-        lower_values = self.lower_values.squeeze().clone()
+
 
         mask_less_than_0 = (ratio < 0)
         mask_greater_than_0 = (ratio > 0)
@@ -263,12 +277,26 @@ class PerturbationL0NormPatch(Perturbation):
         average = (upper_values + lower_values) / 2
         # dif = torch.nonzero(mv_reduced).size(0)
 
-        ptb = PerturbationL0NormPatch(self.eps, average.unsqueeze(0))
+        difference = upper_values - lower_values
+        max_difference_index = torch.argmax(difference)
+        max_difference_coords = ((max_difference_index // difference.size(1)).item(), (max_difference_index % difference.size(1)).item())
+
+        mid = upper_values.clone()
+        mid[max_difference_coords[0], max_difference_coords[1]] = average[max_difference_coords[0], max_difference_coords[1]]
+        ptb = PerturbationL0NormPatch(self.eps, x, self.unlocked_patches)
         ptb.lower_values = lower_values.unsqueeze(0)
-        ptb.upper_values = upper_values.unsqueeze(0)
+        ptb.upper_values = mid.unsqueeze(0)
         ptb.dif = 1
 
-        return ptb, average.unsqueeze(0)
+        mid = lower_values.clone()
+        mid[max_difference_coords[0], max_difference_coords[1]] = average[
+            max_difference_coords[0], max_difference_coords[1]]
+        ptb2 = PerturbationL0NormPatch(self.eps, x, self.unlocked_patches)
+        ptb2.lower_values = mid.unsqueeze(0)
+        ptb2.upper_values = upper_values.unsqueeze(0)
+        ptb2.dif = 1
+
+        return ptb, ptb2
 
     def get_upper_lower_dif(self, inputs, mv_reduced):
         max_filter_kernel_size = (self.eps[0].item(), self.eps[1].item())
@@ -284,7 +312,7 @@ class PerturbationL0NormPatch(Perturbation):
 
     def split(self, x, A, bias):
         ptb3 = None
-        avg = None
+        ptb4 = None
         sign = -1
 
         input_dim = x[0].shape
@@ -293,14 +321,13 @@ class PerturbationL0NormPatch(Perturbation):
         center, max_values, _ = self.extract_info(A, eps, input_dim, sign, x)
         inputs = x.view(input_dim)
 
-        thresh = center[0] + bias.t()
-        thresh_broadcasted = thresh.squeeze(0).unsqueeze(-1).unsqueeze(-1)
-        mv_adjusted = torch.clamp(max_values - thresh_broadcasted, min=0)
-        mv_reduced = \
-        torch.max(mv_adjusted.view(mv_adjusted.size(0), mv_adjusted.size(-1) * mv_adjusted.size(-2)), dim=0)[0].view(
-            mv_adjusted.size(-2), mv_adjusted.size(-1))
+        mv_adjusted, mv_reduced = self.get_mv_adjusted_and_reduced(bias, center, max_values)
+
         non_zero_list = torch.nonzero(mv_reduced)
         non_zero_list = non_zero_list[:non_zero_list.size(0) // 2]
+
+
+
         first_half = torch.zeros_like(mv_reduced)
         row_indices = non_zero_list[:, 0]
         col_indices = non_zero_list[:, 1]
@@ -308,21 +335,37 @@ class PerturbationL0NormPatch(Perturbation):
         second_half = mv_reduced - first_half
 
         dif, lower_adj, upper_adj = self.get_upper_lower_dif(inputs, first_half)
-        ptb1 = PerturbationL0NormPatch(self.eps, x)
+        ptb1 = PerturbationL0NormPatch(self.eps, x, first_half)
         ptb1.lower_values = lower_adj.unsqueeze(0)
         ptb1.upper_values = upper_adj.unsqueeze(0)
         ptb1.dif = dif
 
         dif, lower_adj, upper_adj = self.get_upper_lower_dif(inputs, second_half)
-        ptb2 = PerturbationL0NormPatch(self.eps, x)
+        ptb2 = PerturbationL0NormPatch(self.eps, x, second_half)
         ptb2.lower_values = lower_adj.unsqueeze(0)
         ptb2.upper_values = upper_adj.unsqueeze(0)
         ptb2.dif = dif
 
         if self.dif == 1 and (ptb1.dif == 1 or ptb2.dif == 1):
-            ptb3, avg = self.partition_input(x, A, bias)
+            ptb3, ptb4 = self.partition_input(x, A, bias)
 
-        return ptb1, ptb2, ptb3, avg
+        return ptb1, ptb2, ptb3, ptb4
+
+    def get_mv_adjusted_and_reduced(self, bias, center, max_values):
+        thresh = center[0] + bias.t()
+        thresh_broadcasted = thresh.squeeze(0).unsqueeze(-1).unsqueeze(-1)
+        mv_adjusted = torch.clamp(max_values - thresh_broadcasted, min=0)
+        # experimental
+        z_mask = max_values == 0
+        mv_adjusted[z_mask] = 0
+        mv_reduced = \
+            torch.max(mv_adjusted.view(mv_adjusted.size(0), mv_adjusted.size(-1) * mv_adjusted.size(-2)), dim=0)[
+                0].view(
+                mv_adjusted.size(-2), mv_adjusted.size(-1))
+        # experimental 2
+        z_mask_patches = self.unlocked_patches == 0
+        mv_reduced[z_mask_patches] = 0
+        return mv_adjusted, mv_reduced
 
     def extract_info(self, A, eps, input_dim, sign, x):
         x = x.reshape(x.shape[0], -1, 1)
