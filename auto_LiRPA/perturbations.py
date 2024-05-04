@@ -144,11 +144,9 @@ class PerturbationL0NormPatch(Perturbation):
         self.dif = torch.nonzero(torch.ones_like(image)).size(0)
         self.unlocked_patches = unlocked_patches
 
-
     # def find_unlocked_patches(self, x, A, bias):
     #     difference = self.upper_values - self.lower_values
     #     kernel =
-
 
     def concretize(self, x, A, sign=-1, aux=None):
         if A is None:
@@ -232,8 +230,7 @@ class PerturbationL0NormPatch(Perturbation):
     #     return self.dif
 
     def get_average(self):
-        return (self.upper_values + self.lower_values ) / 2
-
+        return (self.upper_values + self.lower_values) / 2
 
     def partition_input(self, x, A, bias):
         input_dim = x[0].shape
@@ -270,7 +267,6 @@ class PerturbationL0NormPatch(Perturbation):
             weight = A.squeeze()[working_idx].view(input_dim)
             ratio = max_pooled / weight
 
-
             mask_less_than_0 = (ratio < 0)
             mask_greater_than_0 = (ratio > 0)
             lower_values[mask_less_than_0] = torch.max(upper_values + ratio, lower_values)[mask_less_than_0]
@@ -281,10 +277,12 @@ class PerturbationL0NormPatch(Perturbation):
 
         difference = upper_values - lower_values
         max_difference_index = torch.argmax(difference)
-        max_difference_coords = ((max_difference_index // difference.size(1)).item(), (max_difference_index % difference.size(1)).item())
+        max_difference_coords = (
+        (max_difference_index // difference.size(1)).item(), (max_difference_index % difference.size(1)).item())
 
         mid = upper_values.clone()
-        mid[max_difference_coords[0], max_difference_coords[1]] = average[max_difference_coords[0], max_difference_coords[1]]
+        mid[max_difference_coords[0], max_difference_coords[1]] = average[
+            max_difference_coords[0], max_difference_coords[1]]
 
         ptb = PerturbationL0NormPatch(self.eps, x, self.unlocked_patches)
         ptb.lower_values = lower_values.unsqueeze(0)
@@ -327,8 +325,6 @@ class PerturbationL0NormPatch(Perturbation):
         non_zero_list = torch.nonzero(mv_reduced)
         non_zero_list = non_zero_list[:non_zero_list.size(0) // 2]
 
-
-
         first_half = torch.zeros_like(mv_reduced)
         row_indices = non_zero_list[:, 0]
         col_indices = non_zero_list[:, 1]
@@ -361,8 +357,6 @@ class PerturbationL0NormPatch(Perturbation):
         # when thresh < 0 where max_values == 0
         z_mask = max_values == 0
         mv_adjusted[z_mask] = 0
-
-
 
         mv_reduced = \
             torch.max(mv_adjusted.view(mv_adjusted.size(0), mv_adjusted.size(-1) * mv_adjusted.size(-2)), dim=0)[

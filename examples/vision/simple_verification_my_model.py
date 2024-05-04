@@ -88,7 +88,6 @@ def run_recursive_verification(model, image, ptb, true_label, eps, depth=0):
         elif torch.argmax(model(ptb1.upper_values)) != true_label:
             return False
         else:
-
             return run_recursive_verification(model, ptb1.get_average(), ptb1, true_label, eps, depth=depth+1) and run_recursive_verification(model, ptb2.get_average(), ptb2, true_label, eps, depth=depth+1)
     return run_recursive_verification(model, image, ptb1, true_label, eps, depth=depth+1) and run_recursive_verification(model, image, ptb2, true_label, eps, depth=depth+1)
 
