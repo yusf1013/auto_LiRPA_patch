@@ -1,12 +1,29 @@
+#########################################################################
+##   This file is part of the auto_LiRPA library, a core part of the   ##
+##   α,β-CROWN (alpha-beta-CROWN) neural network verifier developed    ##
+##   by the α,β-CROWN Team                                             ##
+##                                                                     ##
+##   Copyright (C) 2020-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 """BoundRelu."""
 from typing import Optional, Tuple
 import torch
 from torch import Tensor
+from torch.nn import Module
+from torch.autograd import Function
 from collections import OrderedDict
 from .base import *
 from .clampmult import multiply_by_A_signs
 from .activation_base import BoundActivation, BoundOptimizableActivation
-from .gradient_modules import ReLUGrad
 from .solver_utils import grb
 from ..utils import unravel_index, prod
 
@@ -17,6 +34,7 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
         self.options = options
         self.ibp_intermediate = True
         self.splittable = True
+        self.relu_options = options.get('relu', 'adaptive')  # FIXME: use better names.
         self.use_sparse_spec_alpha = options.get('sparse_spec_alpha', False)
         self.use_sparse_features_alpha = options.get('sparse_features_alpha', False)
         self.alpha_lookup_idx = self.alpha_indices = None
@@ -29,7 +47,7 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
         self.cut_module = None
 
     def init_opt_parameters(self, start_nodes):
-        ref = self.inputs[0].lower # a reference variable for getting the shape
+        ref = self.inputs[0].lower  # a reference variable for getting the shape
         batch_size = ref.size(0)
         self.alpha = OrderedDict()
         self.alpha_lookup_idx = OrderedDict()  # For alpha with sparse spec dimention.
@@ -41,8 +59,8 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
         # C*H*W dimesnion of this layer.
         minimum_sparsity = self.options.get('minimum_sparsity', 0.9)
         if (self.use_sparse_features_alpha
-                and hasattr(self.inputs[0], 'lower')
-                and hasattr(self.inputs[0], 'upper')):
+                and self.inputs[0].is_lower_bound_current()
+                and self.inputs[0].is_upper_bound_current()):
             # Pre-activation bounds available, we will store the alpha for unstable neurons only.
             # Since each element in a batch can have different unstable neurons,
             # for simplicity we find a super-set using any(dim=0).
@@ -59,8 +77,8 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
                 elif len(self.alpha_indices) == 3:
                     # This layer is after a conv2d layer.
                     alpha_init = self.init_d[
-                        :, :, self.alpha_indices[0], self.alpha_indices[1],
-                        self.alpha_indices[2]]
+                                 :, :, self.alpha_indices[0], self.alpha_indices[1],
+                                 self.alpha_indices[2]]
                 elif len(self.alpha_indices) == 2:
                     # This layer is after a conv1d layer.
                     alpha_init = self.init_d[
@@ -95,7 +113,9 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
             # unstable_idx may be a tensor (dense layer or conv layer
             # with shared alpha), or tuple of 3-d tensors (conv layer with
             # non-sharing alpha).
-            sparsity = float('inf') if unstable_idx is None else unstable_idx.size(0) if isinstance(unstable_idx, torch.Tensor) else unstable_idx[0].size(0)
+            sparsity = float('inf') if unstable_idx is None else unstable_idx.size(0) if isinstance(unstable_idx,
+                                                                                                    torch.Tensor) else \
+            unstable_idx[0].size(0)
             if sparsity <= minimum_sparsity * size_s and self.use_sparse_spec_alpha:
                 # For fully connected layer, or conv layer with shared alpha per channel.
                 # shape is (2, sparse_spec, batch, this_layer_shape)
@@ -135,8 +155,9 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
                                              dtype=torch.float, device=ref.device, requires_grad=True)
                 self.alpha[ns].data.copy_(alpha_init.data)  # This will broadcast to (2, spec) dimensions
                 if verbosity > 0:
-                    print(f'layer {self.name} start_node {ns} using full alpha {list(self.alpha[ns].size())} with unstable '
-                          f'size {sparsity if unstable_idx is not None else None} total_size {size_s} output_shape {output_shape}')
+                    print(
+                        f'layer {self.name} start_node {ns} using full alpha {list(self.alpha[ns].size())} with unstable '
+                        f'size {sparsity if unstable_idx is not None else None} total_size {size_s} output_shape {output_shape}')
                 # alpha_lookup_idx can be used for checking if sparse alpha is used or not.
                 self.alpha_lookup_idx[ns] = None
 
@@ -168,7 +189,8 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
                             # alpha is not shared, so it has shape [2, spec, batch, *this_layer_shape]
                             # Reshape the spec dimension to c*h*w so we can select used alphas based on unstable index.
                             # Shape becomes [2, out_c, out_h, out_w, batch, *this_layer_shape]
-                            selected_alpha = selected_alpha.view(selected_alpha.size(0), *start_node.output_shape[1:], *selected_alpha.shape[2:])
+                            selected_alpha = selected_alpha.view(selected_alpha.size(0), *start_node.output_shape[1:],
+                                                                 *selected_alpha.shape[2:])
                             selected_alpha = selected_alpha[:, unstable_idx[0], unstable_idx[1], unstable_idx[2]]
                     else:
                         assert alpha_lookup_idx.ndim == 3
@@ -194,7 +216,8 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
                     selected_alpha = self.alpha[start_node.name]
                 else:
                     _unstable_idx = alpha_lookup_idx[unstable_idx] if alpha_lookup_idx is not None else unstable_idx
-                    selected_alpha = self.non_deter_index_select(self.alpha[start_node.name], index=_unstable_idx, dim=1)
+                    selected_alpha = self.non_deter_index_select(self.alpha[start_node.name], index=_unstable_idx,
+                                                                 dim=1)
             elif unstable_idx.ndim == 2:
                 assert alpha_lookup_idx is None, "sparse spec alpha has not been implemented yet."
                 # Each element in the batch selects different neurons.
@@ -230,22 +253,11 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
         unstable_idx: indices for the unstable neurons, whose bounds need to be computed.
                       Either be a tuple (for patches) or a 1-D tensor.
         """
-        # Usage of output constraints requires access to bounds of the previous iteration
-        # (see _clear_and_set_new)
-        apply_output_constraints_to = self.options["optimize_bound_args"]["apply_output_constraints_to"]
-        if hasattr(x, "lower"):
-            lower = x.lower
-        else:
-            assert start_node.are_output_constraints_activated_for_layer(apply_output_constraints_to)
-            lower = x.previous_iteration_lower
-        if hasattr(x, "upper"):
-            upper = x.upper
-        else:
-            assert start_node.are_output_constraints_activated_for_layer(apply_output_constraints_to)
-            upper = x.previous_iteration_upper
+        lower = x.lower
+        upper = x.upper
         # Get element-wise CROWN linear relaxations.
         (upper_d, upper_b, lower_d, lower_b, lb_lower_d, ub_lower_d,
-            lb_upper_d, ub_upper_d, alpha_lookup_idx) = \
+         lb_upper_d, ub_upper_d, lb_upper_b, ub_upper_b, alpha_lookup_idx) = \
             self._backward_relaxation(last_lA, last_uA, x, start_node, unstable_idx)
         # save for calculate babsr score
         self.d = upper_d
@@ -258,8 +270,9 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
             if last_A is None:
                 return None, 0
             # Obtain the new linear relaxation coefficients based on the signs in last_A.
+            same_slope = True if self.relu_options == "same-slope" else False
             _A, _bias = multiply_by_A_signs(
-                last_A, d_pos, d_neg, b_pos, b_neg, reduce_bias=reduce_bias)
+                last_A, d_pos, d_neg, b_pos, b_neg, reduce_bias=reduce_bias, same_slope=same_slope)
             if isinstance(last_A, Patches):
                 # Save the patch size, which will be used in init_alpha() to determine the number of optimizable parameters.
                 A_prod = _A.patches
@@ -298,7 +311,8 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
         upper_d = maybe_unfold_patches(upper_d, last_lA if last_lA is not None else last_uA)
         lower_d = maybe_unfold_patches(lower_d, last_lA if last_lA is not None else last_uA)
         upper_b = maybe_unfold_patches(upper_b, last_lA if last_lA is not None else last_uA)
-        lower_b = maybe_unfold_patches(lower_b, last_lA if last_lA is not None else last_uA)  # for ReLU it is always None; keeping it here for completeness.
+        lower_b = maybe_unfold_patches(lower_b,
+                                       last_lA if last_lA is not None else last_uA)  # for ReLU it is always None; keeping it here for completeness.
         # ub_lower_d and lb_lower_d might have sparse spec dimension, so they may need alpha_lookup_idx to convert to actual spec dim.
         ub_lower_d = maybe_unfold_patches(ub_lower_d, last_uA, alpha_lookup_idx=alpha_lookup_idx)
         ub_upper_d = maybe_unfold_patches(ub_upper_d, last_uA, alpha_lookup_idx=alpha_lookup_idx)
@@ -306,6 +320,10 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
         # patches mode lb_lower_d after unfold: unstable, batch, in_C, H, W
         lb_lower_d = maybe_unfold_patches(lb_lower_d, last_lA, alpha_lookup_idx=alpha_lookup_idx)
         lb_upper_d = maybe_unfold_patches(lb_upper_d, last_lA, alpha_lookup_idx=alpha_lookup_idx)
+        # ub_upper_b and lb_upper_b can also be optimizable variables, just like ub/lb_upper/lower_d.
+        # This is only possible when alpha is optimized in the "same-slope" setting, where we move the linear upper bound together with the lower bound.
+        ub_upper_b = maybe_unfold_patches(ub_upper_b, last_lA, alpha_lookup_idx=alpha_lookup_idx)
+        lb_upper_b = maybe_unfold_patches(lb_upper_b, last_lA, alpha_lookup_idx=alpha_lookup_idx)
 
         if self.cut_used:
             assert reduce_bias
@@ -319,10 +337,12 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
         else:
             uA, ubias = _bound_oneside(
                 last_uA, ub_upper_d if upper_d is None else upper_d,
-                ub_lower_d if lower_d is None else lower_d, upper_b, lower_b)
+                ub_lower_d if lower_d is None else lower_d,
+                ub_upper_b if ub_upper_b is not None else upper_b, lower_b)
             lA, lbias = _bound_oneside(
                 last_lA, lb_lower_d if lower_d is None else lower_d,
-                lb_upper_d if upper_d is None else upper_d, lower_b, upper_b)
+                lb_upper_d if upper_d is None else upper_d,
+                lower_b, lb_upper_b if lb_upper_b is not None else upper_b)
 
         if self.cut_used:
             # propagate prerelu node in cut constraints
@@ -352,7 +372,6 @@ class BoundTwoPieceLinear(BoundOptimizableActivation):
 class BoundRelu(BoundTwoPieceLinear):
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
-        self.relu_options = options.get('relu', 'adaptive')  # FIXME: use better names.
         self.leaky_alpha = attr.get('alpha', 0)
         self.alpha_size = 2
         # Alpha dimension is (2, output_shape, batch, *shape) for ReLU.
@@ -389,7 +408,7 @@ class BoundRelu(BoundTwoPieceLinear):
             # Always use slope 1 as lower bound
             lower_k = ((upper_k > self.leaky_alpha).to(upper_k)
                        + (upper_k <= self.leaky_alpha).to(upper_k)
-                          * self.leaky_alpha)
+                       * self.leaky_alpha)
         else:
             # adaptive
             if self.leaky_alpha == 0:
@@ -399,6 +418,42 @@ class BoundRelu(BoundTwoPieceLinear):
                 lower_k = ((upper_k > 0.5).to(upper_k)
                            + (upper_k <= 0.5).to(upper_k) * self.leaky_alpha)
         return lower_k
+
+    def _relu_upper_opt_same_slope(self, lb_lower_d, ub_lower_d, upper_d, lower, upper):
+        """
+        When "same-slope" option is enabled in CROWN-Optimized method, lower_d is get directly
+        from the optimizable paramters, so we force upper_d to be same as lower_d.
+
+        We want the same-slope upper bound to be as tight as possible, so it should pass one of the
+        vertices of the triangular convex hull of ReLU.
+
+        upper_d is the slopes of the upper bounds compputed with normal triangle relaxation.
+        For a single element:
+        - lb_lower_d > upper_d => The same-slope upper bound should pass through the left endpoint of relu;
+        - lb_lower_d < upper_d => The same-slope upper bound should pass through the right endpoint of relu.
+        """
+        lower_y = F.relu(lower)
+        upper_y = F.relu(upper)
+
+        if lb_lower_d is None:
+            lb_upper_d = lb_upper_b = None
+        else:
+            lb_upper_d = lb_lower_d
+            b_left = lower_y - lb_upper_d * lower
+            b_right = upper_y - lb_upper_d * upper
+            use_left_end = (lb_lower_d >= upper_d)
+            lb_upper_b = use_left_end * b_left + ~use_left_end * b_right
+
+        if ub_lower_d is None:
+            ub_upper_d = ub_upper_b = None
+        else:
+            ub_upper_d = ub_lower_d
+            b_left = lower_y - ub_upper_d * lower
+            b_right = upper_y - ub_upper_d * upper
+            use_left_end = (ub_lower_d >= upper_d)
+            ub_upper_b = use_left_end * b_left + ~use_left_end * b_right
+
+        return lb_upper_d, lb_upper_b, ub_upper_d, ub_upper_b
 
     def _forward_relaxation(self, x):
         self._init_masks(x)
@@ -423,7 +478,7 @@ class BoundRelu(BoundTwoPieceLinear):
         # But here it is using adaptive bounds which seem to be better
         # for nn4sys benchmark with loose input bounds. Need confirmation
         # for other cases.
-        self.lower_d = lower_k.detach() # saved for initializing optimized bounds
+        self.lower_d = lower_k.detach()  # saved for initializing optimized bounds
 
         self.lw = self.mask_both * lower_k + self.mask_pos
 
@@ -438,10 +493,10 @@ class BoundRelu(BoundTwoPieceLinear):
         upper_k, upper_b = self._relu_upper_bound(
             x.lower, x.upper, self.leaky_alpha)
         w_new = (self.mask_pos.unsqueeze(1) * x.lw
-            + self.mask_both.unsqueeze(1) * upper_k.unsqueeze(1) * x.lw)
+                 + self.mask_both.unsqueeze(1) * upper_k.unsqueeze(1) * x.lw)
         upper_b = self.mask_both * upper_b / 2
         b_new = (self.mask_pos * x.lb
-            + self.mask_both * upper_k * x.lb + upper_b)
+                 + self.mask_both * upper_k * x.lb + upper_b)
 
         # Create new variables for unstable ReLU
         batch_size = w_new.shape[0]
@@ -458,7 +513,7 @@ class BoundRelu(BoundTwoPieceLinear):
         index = (index - (offset + w_new.shape[1] - x.tot_dim)).clamp(min=0)
         num_new_dim = int(index.max())
         num_new_dim_actual = min(num_new_dim, max_dim - w_new.shape[1])
-        index = index.clamp(max=num_new_dim_actual+1)
+        index = index.clamp(max=num_new_dim_actual + 1)
         w_unstable = torch.zeros(batch_size, num_new_dim_actual + 2, unstable.size(-1), device=device)
         x_L_unstable = -torch.ones(batch_size, num_new_dim_actual, device=device)
         x_U_unstable = torch.ones(batch_size, num_new_dim_actual, device=device)
@@ -499,9 +554,9 @@ class BoundRelu(BoundTwoPieceLinear):
         return upper_d, upper_b
 
     @staticmethod
-    def _relu_mask_alpha(lower, upper, lb_lower_d : Optional[Tensor],
-                         ub_lower_d : Optional[Tensor], leaky_alpha : float = 0,
-                        ) -> Tuple[Optional[Tensor], Optional[Tensor], Tensor]:
+    def _relu_mask_alpha(lower, upper, lb_lower_d: Optional[Tensor],
+                         ub_lower_d: Optional[Tensor], leaky_alpha: float = 0,
+                         ) -> Tuple[Optional[Tensor], Optional[Tensor], Tensor]:
         lower_mask = (lower >= 0).requires_grad_(False).to(lower.dtype)
         upper_mask = (upper <= 0).requires_grad_(False)
         if leaky_alpha > 0:
@@ -511,14 +566,14 @@ class BoundRelu(BoundTwoPieceLinear):
         no_mask = (1. - lower_mask) * (1. - upper_mask.to(upper.dtype))
         if lb_lower_d is not None:
             lb_lower_d = (
-                torch.clamp(lb_lower_d, min=leaky_alpha, max=1.) * no_mask
-                + lower_mask)
+                    torch.clamp(lb_lower_d, min=leaky_alpha, max=1.) * no_mask
+                    + lower_mask)
             if leaky_alpha > 0:
                 lb_lower_d += upper_mask * leaky_alpha
         if ub_lower_d is not None:
             ub_lower_d = (
-                torch.clamp(ub_lower_d, min=leaky_alpha, max=1.) * no_mask
-                + lower_mask)
+                    torch.clamp(ub_lower_d, min=leaky_alpha, max=1.) * no_mask
+                    + lower_mask)
             if leaky_alpha > 0:
                 ub_lower_d += upper_mask * leaky_alpha
         return lb_lower_d, ub_lower_d, zero_coeffs
@@ -528,16 +583,8 @@ class BoundRelu(BoundTwoPieceLinear):
         # (see _clear_and_set_new)
         if x is not None:
             apply_output_constraints_to = self.options['optimize_bound_args']['apply_output_constraints_to']
-            if hasattr(x, "lower"):
-                lower = x.lower
-            else:
-                assert start_node.are_output_constraints_activated_for_layer(apply_output_constraints_to)
-                lower = x.previous_iteration_lower
-            if hasattr(x, "upper"):
-                upper = x.upper
-            else:
-                assert start_node.are_output_constraints_activated_for_layer(apply_output_constraints_to)
-                upper = x.previous_iteration_upper
+            lower = x.lower
+            upper = x.upper
         else:
             lower = self.lower
             upper = self.upper
@@ -546,14 +593,18 @@ class BoundRelu(BoundTwoPieceLinear):
         upper_d, upper_b = self._relu_upper_bound(lower, upper, self.leaky_alpha)
 
         flag_expand = False
+
         ub_lower_d = lb_lower_d = None
+        ub_upper_d = lb_upper_d = None
+        ub_upper_b = lb_upper_b = None
+
         lower_b = None  # ReLU does not have lower bound intercept (=0).
         alpha_lookup_idx = None  # For sparse-spec alpha.
         if self.opt_stage in ['opt', 'reuse']:
             # Alpha-CROWN.
             lower_d = None
             selected_alpha, alpha_lookup_idx = self.select_alpha_by_idx(last_lA, last_uA,
-                unstable_idx, start_node, alpha_lookup_idx)
+                                                                        unstable_idx, start_node, alpha_lookup_idx)
             # The first dimension is lower/upper intermediate bound.
             if last_lA is not None:
                 lb_lower_d = selected_alpha[0]
@@ -575,6 +626,13 @@ class BoundRelu(BoundTwoPieceLinear):
             lb_lower_d, ub_lower_d, zero_coeffs = self._relu_mask_alpha(lower, upper, lb_lower_d, ub_lower_d)
             self.zero_backward_coeffs_l = self.zero_backward_coeffs_u = zero_coeffs
             flag_expand = True  # we already have the spec dimension.
+
+            if self.relu_options == "same-slope":
+                # same-slope with optimized lower_d
+                # We force upper_d to be the same as lower_d, and compute the corresponding upper_b
+                lb_upper_d, lb_upper_b, ub_upper_d, ub_upper_b = self._relu_upper_opt_same_slope(lb_lower_d, ub_lower_d,
+                                                                                                 upper_d, lower, upper)
+
         else:
             # FIXME: the shape can be incorrect if unstable_idx is not None.
             # This will cause problem if some ReLU layers are optimized, some are not.
@@ -584,14 +642,29 @@ class BoundRelu(BoundTwoPieceLinear):
         upper_d = upper_d.unsqueeze(0)
         upper_b = upper_b.unsqueeze(0)
         if not flag_expand:
+            # FIXME: The following lines seem unused since
+            # flag_expand must be true when self.optstage in ['opt, 'reuse']              
             if self.opt_stage in ['opt', 'reuse']:
                 # We have different slopes for lower and upper bounds propagation.
                 lb_lower_d = lb_lower_d.unsqueeze(0) if last_lA is not None else None
                 ub_lower_d = ub_lower_d.unsqueeze(0) if last_uA is not None else None
+
+                if self.relu_options == "same-slope":
+                    upper_d = None
+                    lb_upper_d = lb_upper_d.unsqueeze(0) if last_lA is not None else None
+                    lb_upper_b = lb_upper_b.unsqueeze(0) if last_lA is not None else None
+                    ub_upper_d = ub_upper_d.unsqueeze(0) if last_uA is not None else None
+                    ub_upper_b = ub_upper_b.unsqueeze(0) if last_uA is not None else None
             else:
                 lower_d = lower_d.unsqueeze(0)
+
+        if self.opt_stage in ['opt', 'reuse'] and self.relu_options == "same-slope":
+            # Remove upper_d and upper_b to avoid confusion later
+            upper_d = None
+            upper_b = None
+
         return (upper_d, upper_b, lower_d, lower_b, lb_lower_d, ub_lower_d,
-            None, None, alpha_lookup_idx)
+                lb_upper_d, ub_upper_d, lb_upper_b, ub_upper_b, alpha_lookup_idx)
 
     def interval_propagate(self, *v):
         h_L, h_U = v[0][0], v[0][1]
@@ -627,7 +700,7 @@ class BoundRelu(BoundTwoPieceLinear):
             else:
                 ub = pre_ub
 
-                var = model.addVar(ub=ub, lb=pre_lb,
+                var = model.addVar(ub=ub, lb=0,
                                    obj=0,
                                    vtype=grb.GRB.CONTINUOUS,
                                    name=f'ReLU{self.name}_{neuron_idx}')
@@ -647,17 +720,13 @@ class BoundRelu(BoundTwoPieceLinear):
                         model.addConstr(var >= pre_var, name=f'ReLU{self.name}_{neuron_idx}_a_1'))
                     new_relu_layer_constrs.append(
                         model.addConstr(pre_ub * a >= var, name=f'ReLU{self.name}_{neuron_idx}_a_2'))
-                    new_relu_layer_constrs.append(
-                        model.addConstr(var >= 0, name=f'ReLU{self.name}_{neuron_idx}_a_3'))
 
                 elif model_type == "lp":
                     new_relu_layer_constrs.append(
-                        model.addConstr(var >= 0, name=f'ReLU{self.name}_{neuron_idx}_a_0'))
-                    new_relu_layer_constrs.append(
-                        model.addConstr(var >= pre_var, name=f'ReLU{self.name}_{neuron_idx}_a_1'))
+                        model.addConstr(var >= pre_var, name=f'ReLU{self.name}_{neuron_idx}_a_0'))
                     new_relu_layer_constrs.append(model.addConstr(
                         pre_ub * pre_var - (pre_ub - pre_lb) * var >= pre_ub * pre_lb,
-                        name=f'ReLU{self.name}_{neuron_idx}_a_2'))
+                        name=f'ReLU{self.name}_{neuron_idx}_a_1'))
 
                 else:
                     print(f"gurobi model type {model_type} not supported!")
@@ -678,7 +747,7 @@ class BoundRelu(BoundTwoPieceLinear):
         grad_input = (grad_upstream, self.inputs[0].forward_value)
         # An extra node is needed to consider the state of ReLU activation
         grad_extra_nodes = [self.inputs[0]]
-        return node_grad, grad_input, grad_extra_nodes
+        return [(node_grad, grad_input, grad_extra_nodes)]
 
     def get_split_mask(self, lower, upper, input_index):
         assert input_index == 0
@@ -709,24 +778,28 @@ class BoundSign(BoundActivation):
             mask_0, torch.logical_or(mask_pos, mask_pos_0)),
             torch.logical_or(mask_neg, mask_neg_0)))
         self.add_linear_relaxation(mask=mask_0, type='lower',
-            k=0, x0=torch.zeros_like(x.upper, requires_grad=True), y0=0)
+                                   k=0, x0=torch.zeros_like(x.upper, requires_grad=True), y0=0)
         self.add_linear_relaxation(mask=mask_0, type='upper',
-            k=0, x0=torch.zeros_like(x.upper, requires_grad=True), y0=0)
+                                   k=0, x0=torch.zeros_like(x.upper, requires_grad=True), y0=0)
 
         self.add_linear_relaxation(mask=mask_pos_0, type='lower',
-            k=1/x.upper.clamp(min=1e-8), x0=torch.zeros_like(x.upper), y0=0)
+                                   k=1 / x.upper.clamp(min=1e-8), x0=torch.zeros_like(x.upper), y0=0)
         self.add_linear_relaxation(mask=torch.logical_or(mask_pos_0, mask_pos), type='upper',
-            k=0, x0=torch.zeros_like(x.upper, requires_grad=True), y0=1)
+                                   k=0, x0=torch.zeros_like(x.upper, requires_grad=True), y0=1)
 
         self.add_linear_relaxation(mask=torch.logical_or(mask_neg_0, mask_neg), type='lower',
-            k=0, x0=torch.zeros_like(x.upper, requires_grad=True), y0=-1)
+                                   k=0, x0=torch.zeros_like(x.upper, requires_grad=True), y0=-1)
         self.add_linear_relaxation(mask=mask_neg_0, type='upper',
-            k=-1/x.lower.clamp(max=-1e-8), x0=torch.zeros_like(x.upper), y0=0)
+                                   k=-1 / x.lower.clamp(max=-1e-8), x0=torch.zeros_like(x.upper), y0=0)
 
-        self.add_linear_relaxation(mask=mask_pos, type='lower', k=0, x0=torch.zeros_like(x.upper, requires_grad=True), y0=1)
-        self.add_linear_relaxation(mask=mask_neg, type='upper', k=0, x0=torch.zeros_like(x.upper, requires_grad=True), y0=-1)
-        self.add_linear_relaxation(mask=mask_both, type='lower', k=0, x0=torch.zeros_like(x.upper, requires_grad=True), y0=-1)
-        self.add_linear_relaxation(mask=mask_both, type='upper', k=0, x0=torch.zeros_like(x.upper, requires_grad=True), y0=1)
+        self.add_linear_relaxation(mask=mask_pos, type='lower', k=0, x0=torch.zeros_like(x.upper, requires_grad=True),
+                                   y0=1)
+        self.add_linear_relaxation(mask=mask_neg, type='upper', k=0, x0=torch.zeros_like(x.upper, requires_grad=True),
+                                   y0=-1)
+        self.add_linear_relaxation(mask=mask_both, type='lower', k=0, x0=torch.zeros_like(x.upper, requires_grad=True),
+                                   y0=-1)
+        self.add_linear_relaxation(mask=mask_both, type='upper', k=0, x0=torch.zeros_like(x.upper, requires_grad=True),
+                                   y0=1)
 
 
 class SignMergeFunction_loose(torch.autograd.Function):
@@ -740,12 +813,13 @@ class SignMergeFunction_loose(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        eps = 5     # should be carefully chosen
+        eps = 5  # should be carefully chosen
         input, = ctx.saved_tensors
         grad_input = grad_output.clone()
         grad_input[abs(input) >= eps] = 0
         grad_input /= eps
         return grad_input
+
 
 class SignMergeFunction_tight(torch.autograd.Function):
     # Modified SignMerge operator.
@@ -758,7 +832,7 @@ class SignMergeFunction_tight(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        eps = 0.1     # should be carefully chosen
+        eps = 0.1  # should be carefully chosen
         input, = ctx.saved_tensors
         grad_input = grad_output.clone()
         grad_input[abs(input) >= eps] = 0
@@ -772,7 +846,7 @@ class BoundSignMerge(BoundTwoPieceLinear):
         self.alpha_size = 4
         self.loose_function = SignMergeFunction_loose
         self.tight_function = SignMergeFunction_tight
-        self.signmergefunction = self.tight_function    # default
+        self.signmergefunction = self.tight_function  # default
 
     def get_unstable_idx(self):
         self.alpha_indices = torch.logical_and(
@@ -787,96 +861,99 @@ class BoundSignMerge(BoundTwoPieceLinear):
         upper_mask = (upper < 0.).requires_grad_(False).to(upper.dtype)
         no_mask = 1. - (lower_mask + upper_mask)
         if lb_lower_d is not None:
-            lb_lower_d = torch.min(lb_lower_d, 2/upper.clamp(min=1e-8))
+            lb_lower_d = torch.min(lb_lower_d, 2 / upper.clamp(min=1e-8))
             lb_lower_d = torch.clamp(lb_lower_d, min=0) * no_mask
-            lb_upper_d = torch.min(lb_upper_d, -2/lower.clamp(max=-1e-8))
+            lb_upper_d = torch.min(lb_upper_d, -2 / lower.clamp(max=-1e-8))
             lb_upper_d = torch.clamp(lb_upper_d, min=0) * no_mask
         if ub_lower_d is not None:
-            ub_lower_d = torch.min(ub_lower_d, 2/upper.clamp(min=1e-8))
+            ub_lower_d = torch.min(ub_lower_d, 2 / upper.clamp(min=1e-8))
             ub_lower_d = torch.clamp(ub_lower_d, min=0) * no_mask
-            ub_upper_d = torch.min(ub_upper_d, -2/lower.clamp(max=-1e-8))
+            ub_upper_d = torch.min(ub_upper_d, -2 / lower.clamp(max=-1e-8))
             ub_upper_d = torch.clamp(ub_upper_d, min=0) * no_mask
         return lb_lower_d, ub_lower_d, lb_upper_d, ub_upper_d
 
-    # def _backward_relaxation(self, last_lA, last_uA, x, start_node, unstable_idx):
-    #     if x is not None:
-    #         lower, upper = x.lower, x.upper
-    #     else:
-    #         lower, upper = self.lower, self.upper
-    #
-    #     flag_expand = False
-    #     ub_lower_d = lb_lower_d = lb_upper_d = ub_upper_d = None
-    #     alpha_lookup_idx = None  # For sparse-spec alpha.
-    #     if self.opt_stage in ['opt', 'reuse']:
-    #         # Alpha-CROWN.
-    #         upper_d = lower_d = None
-    #         selected_alpha, alpha_lookup_idx = self.select_alpha_by_idx(last_lA, last_uA,
-    #             unstable_idx, start_node, alpha_lookup_idx)
-    #         # The first dimension is lower/upper intermediate bound.
-    #         if last_lA is not None:
-    #             lb_lower_d = selected_alpha[0]
-    #             lb_upper_d = selected_alpha[2]
-    #         if last_uA is not None:
-    #             ub_lower_d = selected_alpha[1]
-    #             ub_upper_d = selected_alpha[3]
-    #
-    #         if self.alpha_indices is not None:
-    #             # Sparse alpha on the hwc dimension. We store slopes for unstable neurons in this layer only.
-    #             # Recover to full alpha first.
-    #             sparse_alpha_shape = lb_lower_d.shape if lb_lower_d is not None else ub_lower_d.shape
-    #             full_alpha_shape = sparse_alpha_shape[:-1] + self.shape
-    #             if lb_lower_d is not None:
-    #                 lb_lower_d = self.reconstruct_full_alpha(
-    #                     lb_lower_d, full_alpha_shape, self.alpha_indices)
-    #                 lb_upper_d = self.reconstruct_full_alpha(
-    #                     lb_upper_d, full_alpha_shape, self.alpha_indices)
-    #             if ub_lower_d is not None:
-    #                 ub_lower_d = self.reconstruct_full_alpha(
-    #                     ub_lower_d, full_alpha_shape, self.alpha_indices)
-    #                 ub_upper_d = self.reconstruct_full_alpha(
-    #                     ub_upper_d, full_alpha_shape, self.alpha_indices)
-    #
-    #         # condition only on the masked part
-    #         if self.inputs[0].alpha_beta_update_mask is not None:
-    #             update_mask = self.inputs[0].alpha_beta_update_mask
-    #             if lb_lower_d is not None:
-    #                 lb_lower_d_new = lb_lower_d[:, update_mask]
-    #                 lb_upper_d_new = lb_upper_d[:, update_mask]
-    #             else:
-    #                 lb_lower_d_new = lb_upper_d_new = None
-    #             if ub_lower_d is not None:
-    #                 ub_lower_d_new = ub_lower_d[:, update_mask]
-    #                 ub_upper_d_new = ub_upper_d[:, update_mask]
-    #             else:
-    #                 ub_lower_d_new = ub_upper_d_new = None
-    #             lb_lower_d, ub_lower_d, lb_upper_d, ub_upper_d = self._mask_alpha(lower, upper,
-    #                 lb_lower_d_new, ub_lower_d_new, lb_upper_d_new, ub_upper_d_new)
-    #         else:
-    #             lb_lower_d, ub_lower_d, lb_upper_d, ub_upper_d = self._mask_alpha(lower, upper,
-    #                 lb_lower_d, ub_lower_d, lb_upper_d, ub_upper_d)
-    #         flag_expand = True  # we already have the spec dimension.
-    #     else:
-    #         lower_d = torch.zeros_like(upper, requires_grad=True)
-    #         upper_d = torch.zeros_like(upper, requires_grad=True)
-    #
-    #     mask_pos = (x.lower >= 0.).requires_grad_(False).to(x.lower.dtype)
-    #     mask_neg = (x.upper < 0.).requires_grad_(False).to(x.upper.dtype)
-    #     lower_b = (-1 * (1 - mask_pos) + mask_pos).unsqueeze(0)
-    #     upper_b = (-1 * mask_neg + (1 - mask_neg)).unsqueeze(0)
-    #
-    #     # Upper bound always needs an extra specification dimension, since they only depend on lb and ub.
-    #     if not flag_expand:
-    #         if self.opt_stage in ['opt', 'reuse']:
-    #             # We have different slopes for lower and upper bounds propagation.
-    #             lb_lower_d = lb_lower_d.unsqueeze(0) if last_lA is not None else None
-    #             ub_lower_d = ub_lower_d.unsqueeze(0) if last_uA is not None else None
-    #             lb_upper_d = lb_lower_d.unsqueeze(0) if last_lA is not None else None
-    #             ub_upper_d = ub_lower_d.unsqueeze(0) if last_uA is not None else None
-    #         else:
-    #             lower_d = lower_d.unsqueeze(0)
-    #             upper_d = upper_d.unsqueeze(0)
-    #     return (upper_d, upper_b, lower_d, lower_b, lb_lower_d, ub_lower_d,
-    #         lb_upper_d, ub_upper_d, alpha_lookup_idx)
+    # This function is probably not used.
+    def _backward_relaxation(self, last_lA, last_uA, x, start_node, unstable_idx):
+        if x is not None:
+            lower, upper = x.lower, x.upper
+        else:
+            lower, upper = self.lower, self.upper
+
+        flag_expand = False
+        ub_lower_d = lb_lower_d = lb_upper_d = ub_upper_d = None
+        alpha_lookup_idx = None  # For sparse-spec alpha.
+        if self.opt_stage in ['opt', 'reuse']:
+            # Alpha-CROWN.
+            upper_d = lower_d = None
+            selected_alpha, alpha_lookup_idx = self.select_alpha_by_idx(last_lA, last_uA,
+                                                                        unstable_idx, start_node, alpha_lookup_idx)
+            # The first dimension is lower/upper intermediate bound.
+            if last_lA is not None:
+                lb_lower_d = selected_alpha[0]
+                lb_upper_d = selected_alpha[2]
+            if last_uA is not None:
+                ub_lower_d = selected_alpha[1]
+                ub_upper_d = selected_alpha[3]
+
+            if self.alpha_indices is not None:
+                # Sparse alpha on the hwc dimension. We store slopes for unstable neurons in this layer only.
+                # Recover to full alpha first.
+                sparse_alpha_shape = lb_lower_d.shape if lb_lower_d is not None else ub_lower_d.shape
+                full_alpha_shape = sparse_alpha_shape[:-1] + self.shape
+                if lb_lower_d is not None:
+                    lb_lower_d = self.reconstruct_full_alpha(
+                        lb_lower_d, full_alpha_shape, self.alpha_indices)
+                    lb_upper_d = self.reconstruct_full_alpha(
+                        lb_upper_d, full_alpha_shape, self.alpha_indices)
+                if ub_lower_d is not None:
+                    ub_lower_d = self.reconstruct_full_alpha(
+                        ub_lower_d, full_alpha_shape, self.alpha_indices)
+                    ub_upper_d = self.reconstruct_full_alpha(
+                        ub_upper_d, full_alpha_shape, self.alpha_indices)
+
+            # condition only on the masked part
+            if self.inputs[0].alpha_beta_update_mask is not None:
+                update_mask = self.inputs[0].alpha_beta_update_mask
+                if lb_lower_d is not None:
+                    lb_lower_d_new = lb_lower_d[:, update_mask]
+                    lb_upper_d_new = lb_upper_d[:, update_mask]
+                else:
+                    lb_lower_d_new = lb_upper_d_new = None
+                if ub_lower_d is not None:
+                    ub_lower_d_new = ub_lower_d[:, update_mask]
+                    ub_upper_d_new = ub_upper_d[:, update_mask]
+                else:
+                    ub_lower_d_new = ub_upper_d_new = None
+                lb_lower_d, ub_lower_d, lb_upper_d, ub_upper_d = self._mask_alpha(lower, upper,
+                                                                                  lb_lower_d_new, ub_lower_d_new,
+                                                                                  lb_upper_d_new, ub_upper_d_new)
+            else:
+                lb_lower_d, ub_lower_d, lb_upper_d, ub_upper_d = self._mask_alpha(lower, upper,
+                                                                                  lb_lower_d, ub_lower_d, lb_upper_d,
+                                                                                  ub_upper_d)
+            flag_expand = True  # we already have the spec dimension.
+        else:
+            lower_d = torch.zeros_like(upper, requires_grad=True)
+            upper_d = torch.zeros_like(upper, requires_grad=True)
+
+        mask_pos = (x.lower >= 0.).requires_grad_(False).to(x.lower.dtype)
+        mask_neg = (x.upper < 0.).requires_grad_(False).to(x.upper.dtype)
+        lower_b = (-1 * (1 - mask_pos) + mask_pos).unsqueeze(0)
+        upper_b = (-1 * mask_neg + (1 - mask_neg)).unsqueeze(0)
+
+        # Upper bound always needs an extra specification dimension, since they only depend on lb and ub.
+        if not flag_expand:
+            if self.opt_stage in ['opt', 'reuse']:
+                # We have different slopes for lower and upper bounds propagation.
+                lb_lower_d = lb_lower_d.unsqueeze(0) if last_lA is not None else None
+                ub_lower_d = ub_lower_d.unsqueeze(0) if last_uA is not None else None
+                lb_upper_d = lb_lower_d.unsqueeze(0) if last_lA is not None else None
+                ub_upper_d = ub_lower_d.unsqueeze(0) if last_uA is not None else None
+            else:
+                lower_d = lower_d.unsqueeze(0)
+                upper_d = upper_d.unsqueeze(0)
+        return (upper_d, upper_b, lower_d, lower_b, lb_lower_d, ub_lower_d,
+                lb_upper_d, ub_upper_d, None, None, alpha_lookup_idx)
 
     def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
 
@@ -919,7 +996,7 @@ class BoundSignMerge(BoundTwoPieceLinear):
                 layer_constrs.append(
                     model.addConstr(pre_ub * (1 - a) >= pre_var, name=f'Sign{self.name}_{neuron_idx}_a_1'))
                 layer_constrs.append(
-                    model.addConstr(var == 1 - 2*a, name=f'Sign{self.name}_{neuron_idx}_a_2'))
+                    model.addConstr(var == 1 - 2 * a, name=f'Sign{self.name}_{neuron_idx}_a_2'))
 
             new_layer_gurobi_vars.append(var)
 
@@ -929,3 +1006,185 @@ class BoundSignMerge(BoundTwoPieceLinear):
         self.solver_vars = new_layer_gurobi_vars
         self.solver_constrs = layer_constrs
         model.update()
+
+
+def relu_grad(preact):
+    return (preact > 0).float()
+
+
+class ReLUGradOp(Function):
+    """ Local gradient of ReLU.
+
+    Not including multiplication with gradients from other layers.
+    """
+
+    @staticmethod
+    def symbolic(_, g, g_relu, g_relu_rev, preact):
+        return _.op('grad::Relu', g, g_relu, g_relu_rev, preact).setType(g.type())
+
+    @staticmethod
+    def forward(ctx, g, g_relu, g_relu_rev, preact):
+        return g * relu_grad(preact)
+
+
+class ReLUGrad(Module):
+    def forward(self, g, preact):
+        g_relu = F.relu(g)
+        g_relu_rev = -F.relu(-g)
+        return ReLUGradOp.apply(g, g_relu, g_relu_rev, preact)
+
+
+# FIXME reuse the function from auto_LiRPA.patches
+def _maybe_unfold(d_tensor, last_A):
+    if d_tensor is None:
+        return None
+
+    # [batch, out_dim, in_c, in_H, in_W]
+    d_shape = d_tensor.size()
+
+    # Reshape to 4-D tensor to unfold.
+    # [batch, out_dim*in_c, in_H, in_W]
+    d_tensor = d_tensor.view(d_shape[0], -1, *d_shape[-2:])
+    # unfold the slope matrix as patches.
+    # Patch shape is [batch, out_h, out_w, out_dim*in_c, H, W).
+    d_unfolded = inplace_unfold(
+        d_tensor, kernel_size=last_A.patches.shape[-2:], stride=last_A.stride,
+        padding=last_A.padding)
+    # Reshape to [batch, out_H, out_W, out_dim, in_C, H, W]
+    d_unfolded_r = d_unfolded.view(
+        *d_unfolded.shape[:3], d_shape[1], *d_unfolded.shape[-2:])
+    if last_A.unstable_idx is not None:
+        if len(last_A.unstable_idx) == 4:
+            # [batch, out_H, out_W, out_dim, in_C, H, W]
+            # to [out_H, out_W, batch, out_dim, in_C, H, W]
+            d_unfolded_r = d_unfolded_r.permute(1, 2, 0, 3, 4, 5, 6)
+            d_unfolded_r = d_unfolded_r[
+                last_A.unstable_idx[2], last_A.unstable_idx[3]]
+        else:
+            raise NotImplementedError
+    # For sparse patches, the shape after unfold is
+    # (unstable_size, batch_size, in_c, H, W).
+    # For regular patches, the shape after unfold is
+    # (spec, batch, out_h, out_w, in_c, H, W).
+    return d_unfolded_r
+
+
+class BoundReluGrad(BoundActivation):
+    def __init__(self, attr=None, inputs=None, output_index=0, options=None):
+        super().__init__(attr, inputs, output_index, options)
+        self.requires_input_bounds = [3]
+        self.recurjac = options.get('recurjac', False)
+
+    @staticmethod
+    def relu_grad(preact):
+        return (preact > 0).float()
+
+    def forward(self, g, g_relu, g_relu_rev, preact):
+        if g.ndim == preact.ndim + 1:
+            preact = preact.unsqueeze(1)
+        return g * relu_grad(preact)
+
+    def interval_propagate(self, *v):
+        g_lower, g_upper = v[0]
+        preact_lower, preact_upper = v[3]
+        relu_grad_lower = relu_grad(preact_lower)
+        relu_grad_upper = relu_grad(preact_upper)
+        if g_lower.ndim == relu_grad_lower.ndim + 1:
+            relu_grad_lower = relu_grad_lower.unsqueeze(1)
+            relu_grad_upper = relu_grad_upper.unsqueeze(1)
+        lower = torch.min(g_lower * relu_grad_lower, g_lower * relu_grad_upper)
+        upper = torch.max(g_upper * relu_grad_lower, g_upper * relu_grad_upper)
+        return lower, upper
+
+    def bound_backward(self, last_lA, last_uA, g, g_relu, g_relu_rev, preact,
+                       **kwargs):
+        mask_active = (preact.lower > 0).float()
+        mask_inactive = (preact.upper < 0).float()
+        mask_unstable = 1 - mask_active - mask_inactive
+
+        if self.recurjac and self.inputs[0].perturbed:
+            upper_grad = preact.upper >= 0
+            lower_interval = self.inputs[0].lower * upper_grad
+            upper_interval = self.inputs[0].upper * upper_grad
+        else:
+            lower_interval = upper_interval = None
+
+        def _bound_oneside(last_A, pos_interval=None, neg_interval=None):
+            if last_A is None:
+                return None, None, None, 0
+
+            if isinstance(last_A, torch.Tensor):
+                if self.recurjac and self.inputs[0].perturbed:
+                    mask_unstable_grad = (
+                            (self.inputs[0].lower < 0) * (self.inputs[0].upper > 0))
+                    last_A_unstable = last_A * mask_unstable_grad
+                    bias = (
+                            last_A_unstable.clamp(min=0) * pos_interval
+                            + last_A_unstable.clamp(max=0) * neg_interval)
+                    bias = bias.reshape(
+                        bias.shape[0], bias.shape[1], -1).sum(dim=-1)
+                    last_A = last_A * torch.logical_not(mask_unstable_grad)
+                else:
+                    bias = 0
+                A = last_A * mask_active
+                A_pos = last_A.clamp(min=0) * mask_unstable
+                A_neg = last_A.clamp(max=0) * mask_unstable
+                return A, A_pos, A_neg, bias
+            elif isinstance(last_A, Patches):
+                last_A_patches = last_A.patches
+
+                if self.recurjac and self.inputs[0].perturbed:
+                    mask_unstable_grad = (
+                            (self.inputs[0].lower < 0) * (self.inputs[0].upper > 0))
+                    mask_unstable_grad_unfold = _maybe_unfold(
+                        mask_unstable_grad, last_A)
+                    last_A_unstable = (
+                            last_A.to_matrix(mask_unstable_grad.shape)
+                            * mask_unstable_grad)
+                    bias = (
+                            last_A_unstable.clamp(min=0) * pos_interval
+                            + last_A_unstable.clamp(max=0) * neg_interval)
+                    # FIXME Clean up patches. This implementation does not seem
+                    # to support general shapes.
+                    assert bias.ndim == 5
+                    bias = bias.sum(dim=[-1, -2, -3]).view(-1, 1)
+                    last_A_patches = (
+                            last_A_patches
+                            * torch.logical_not(mask_unstable_grad_unfold))
+                else:
+                    bias = 0
+
+                # need to unfold mask_active and mask_unstable
+                # [batch, 1, in_c, in_H, in_W]
+                mask_active_unfold = _maybe_unfold(mask_active, last_A)
+                mask_unstable_unfold = _maybe_unfold(mask_unstable, last_A)
+                # [spec, batch, 1, in_c, in_H, in_W]
+
+                mask_active_unfold = mask_active_unfold.expand(last_A.shape)
+                mask_unstable_unfold = mask_unstable_unfold.expand(last_A.shape)
+
+                A = Patches(
+                    last_A_patches * mask_active_unfold,
+                    last_A.stride, last_A.padding, last_A.shape,
+                    last_A.identity, last_A.unstable_idx, last_A.output_shape)
+
+                A_pos_patches = last_A_patches.clamp(min=0) * mask_unstable_unfold
+                A_neg_patches = last_A_patches.clamp(max=0) * mask_unstable_unfold
+
+                A_pos = Patches(
+                    A_pos_patches, last_A.stride, last_A.padding, last_A.shape,
+                    last_A.identity, last_A.unstable_idx, last_A.output_shape)
+                A_neg = Patches(
+                    A_neg_patches, last_A.stride, last_A.padding, last_A.shape,
+                    last_A.identity, last_A.unstable_idx, last_A.output_shape)
+
+                return A, A_pos, A_neg, bias
+
+        lA, lA_pos, lA_neg, lbias = _bound_oneside(
+            last_lA, pos_interval=lower_interval, neg_interval=upper_interval)
+        uA, uA_pos, uA_neg, ubias = _bound_oneside(
+            last_uA, pos_interval=upper_interval, neg_interval=lower_interval)
+
+        return (
+            [(lA, uA), (lA_neg, uA_pos), (lA_pos, uA_neg), (None, None)],
+            lbias, ubias)
