@@ -314,8 +314,6 @@ class PerturbationL0NormPatch(Perturbation):
         return dif, lower_adj, upper_adj
 
     def split(self, x, A, bias):
-        ptb3 = None
-        ptb4 = None
         sign = -1
 
         input_dim = x[0].shape
@@ -324,7 +322,7 @@ class PerturbationL0NormPatch(Perturbation):
         center, max_values, _ = self.extract_info(A, eps, input_dim, sign, x)
         inputs = x.view(input_dim)
 
-        mv_adjusted, mv_reduced = self.get_mv_adjusted_and_reduced(bias, center, max_values)
+        _, mv_reduced = self.get_mv_adjusted_and_reduced(bias, center, max_values)
 
         non_zero_list = torch.nonzero(mv_reduced)
         non_zero_list = non_zero_list[:non_zero_list.size(0) // 2]
@@ -350,24 +348,34 @@ class PerturbationL0NormPatch(Perturbation):
         ptb2.dif = dif
 
         if self.dif == 1 and (ptb1.dif == 1 or ptb2.dif == 1):
-            ptb3, ptb4 = self.partition_input(x, A, bias)
+            ptb1, ptb2 = self.partition_input(x, A, bias)
 
-        return ptb1, ptb2, ptb3, ptb4
+        return ptb1, ptb2
 
     def get_mv_adjusted_and_reduced(self, bias, center, max_values):
         thresh = center[0] + bias.t()
         thresh_broadcasted = thresh.squeeze(0).unsqueeze(-1).unsqueeze(-1)
         mv_adjusted = torch.clamp(max_values - thresh_broadcasted, min=0)
+
         # experimental
+        # when thresh < 0 where max_values == 0
         z_mask = max_values == 0
         mv_adjusted[z_mask] = 0
+
+
+
         mv_reduced = \
             torch.max(mv_adjusted.view(mv_adjusted.size(0), mv_adjusted.size(-1) * mv_adjusted.size(-2)), dim=0)[
                 0].view(
                 mv_adjusted.size(-2), mv_adjusted.size(-1))
-        # experimental 2
-        z_mask_patches = self.unlocked_patches == 0
-        mv_reduced[z_mask_patches] = 0
+
+        # # experimental 2
+        # z_mask_patches = self.unlocked_patches == 0
+        # mv_reduced[z_mask_patches] = 0
+        # blue = torch.clone(mv_reduced)
+        # blue[z_mask_patches] = 0
+        # assert torch.all(blue == mv_reduced)
+
         return mv_adjusted, mv_reduced
 
     def extract_info(self, A, eps, input_dim, sign, x):
@@ -401,6 +409,11 @@ class PerturbationL0NormPatch(Perturbation):
         result = torch.reshape(A_diff, (1, A_diff.shape[1], input_dim[0], input_dim[1]))
         kernel = torch.ones(eps[0], eps[1]).unsqueeze(0).unsqueeze(0)
         max_values = F.conv2d(result[0].unsqueeze(1), kernel)
+
+        # experimental 3
+        mask = self.unlocked_patches == 0
+        max_values[:, :, mask] = 0
+
         max_values_reduced = torch.max(max_values, dim=2)[0]
         max_values_reduced = torch.max(max_values_reduced, dim=2)[0]
         bound = center + sign * max_values_reduced.unsqueeze(0)

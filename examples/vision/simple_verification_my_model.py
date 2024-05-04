@@ -55,8 +55,8 @@ def run_verification(model, image, ptb, true_label):
 
         lower_A, lower_bias = A_dict[lirpa_model.output_name[0]][lirpa_model.input_name[0]]['lA'], \
             A_dict[lirpa_model.output_name[0]][lirpa_model.input_name[0]]['lbias']
-        upper_A, upper_bias = A_dict[lirpa_model.output_name[0]][lirpa_model.input_name[0]]['uA'], \
-            A_dict[lirpa_model.output_name[0]][lirpa_model.input_name[0]]['ubias']
+        # upper_A, upper_bias = A_dict[lirpa_model.output_name[0]][lirpa_model.input_name[0]]['uA'], \
+        #     A_dict[lirpa_model.output_name[0]][lirpa_model.input_name[0]]['ubias']
 
         # # n_classes = len(lb[0])
         # for i in range(N):
@@ -75,21 +75,21 @@ def run_recursive_verification(model, image, ptb, true_label, eps, depth=0):
 
 
     # start_time = time.time()
-    ptb1, ptb2, ptb3, ptb4 = run_verification(model=model, image=image, ptb=ptb, true_label=true_label)
+    ptb1, ptb2 = run_verification(model=model, image=image, ptb=ptb, true_label=true_label)
     # print("Finished in {:.3f}s".format(time.time() - start_time))
 
     if ptb1.dif == 0 and ptb2.dif == 0:
         return True
     if ptb.dif == 1 and (ptb1.dif == 1 or ptb2.dif == 1):
-        if torch.argmax(model(ptb3.get_average())) != true_label:
+        if torch.argmax(model(ptb1.get_average())) != true_label:
             return False
-        elif torch.argmax(model(ptb3.lower_values)) != true_label:
+        elif torch.argmax(model(ptb1.lower_values)) != true_label:
             return False
-        elif torch.argmax(model(ptb3.upper_values)) != true_label:
+        elif torch.argmax(model(ptb1.upper_values)) != true_label:
             return False
         else:
 
-            return run_recursive_verification(model, ptb3.get_average(), ptb3, true_label, eps, depth=depth+1) and run_recursive_verification(model, ptb4.get_average(), ptb4, true_label, eps, depth=depth+1)
+            return run_recursive_verification(model, ptb1.get_average(), ptb1, true_label, eps, depth=depth+1) and run_recursive_verification(model, ptb2.get_average(), ptb2, true_label, eps, depth=depth+1)
     return run_recursive_verification(model, image, ptb1, true_label, eps, depth=depth+1) and run_recursive_verification(model, image, ptb2, true_label, eps, depth=depth+1)
 
 
@@ -122,7 +122,7 @@ def main():
     # images = test_data.data[12:25].view(N, 1, 28, 28)
     images = test_data.data.unsqueeze(1)
     total_time = 0
-    for i, image in enumerate(images[0:3]):
+    for i, image in enumerate(images[2:3]):
         print("Starting image", i)
         image = image.to(torch.float32) / 255.0
 
