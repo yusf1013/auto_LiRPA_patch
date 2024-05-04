@@ -72,49 +72,11 @@ def run_verification(model, image, ptb, true_label):
 
 
 def run_recursive_verification(model, image, ptb, true_label, eps, depth=0):
-    # previous_result = ptb.dif
-    # res = run_verification(model=model, image=image, ptb=ptb, true_label=true_label)
-    # print(res)
-    # if len(res) == 0:
-    #     return True
-    # elif previous_result.size() == res.size() and previous_result == res:
-    #     return False
-    #
-    # num_rows = res.size(0)
-    # split_index = num_rows // 2
-    # first_half = res[:split_index].clone()
-    # second_half = res[split_index:].clone()
-    #
-    # ptb_first_half = PerturbationL0NormPatch(eps=eps, image=image)
-    # ptb_first_half.lower_values = image.clone()
-    # ptb_first_half.upper_values = image.clone()
-    # row_indices = first_half[:, 1]
-    # col_indices = first_half[:, 2]
-    # ptb_first_half.lower_values[0][row_indices, col_indices] = ptb.lower_values[0][row_indices, col_indices]
-    # ptb_first_half.upper_values[0][row_indices, col_indices] = ptb.upper_values[0][row_indices, col_indices]
-    # ptb_first_half.dif = first_half
-    #
-    # # Do the same with second_half
-    # ptb_second_half = PerturbationL0NormPatch(eps=eps, image=image)
-    # ptb_second_half.lower_values = image.clone()
-    # ptb_second_half.upper_values = image.clone()
-    # row_indices = second_half[:, 1]
-    # col_indices = second_half[:, 2]
-    # ptb_second_half.lower_values[0][row_indices, col_indices] = ptb.lower_values[0][row_indices, col_indices]
-    # ptb_second_half.upper_values[0][row_indices, col_indices] = ptb.upper_values[0][row_indices, col_indices]
-    # ptb_second_half.dif = second_half
-    #
-    # # res = run_verification(model=model, image=image, ptb=ptb_first_half, true_label=true_label)
-    # # print(res)
-    # first_result = run_recursive_verification(model, image, ptb_first_half, true_label, eps)
-    # if not first_result:
-    #     return False
-    # second_result = run_recursive_verification(model, image, ptb_second_half, true_label, eps)
-    # return second_result
 
-    start_time = time.time()
+
+    # start_time = time.time()
     ptb1, ptb2, ptb3, ptb4 = run_verification(model=model, image=image, ptb=ptb, true_label=true_label)
-    print("Finished in {:.3f}s".format(time.time() - start_time))
+    # print("Finished in {:.3f}s".format(time.time() - start_time))
 
     if ptb1.dif == 0 and ptb2.dif == 0:
         return True
@@ -126,8 +88,12 @@ def run_recursive_verification(model, image, ptb, true_label, eps, depth=0):
         elif torch.argmax(model(ptb3.upper_values)) != true_label:
             return False
         else:
+
             return run_recursive_verification(model, ptb3.get_average(), ptb3, true_label, eps, depth=depth+1) and run_recursive_verification(model, ptb4.get_average(), ptb4, true_label, eps, depth=depth+1)
     return run_recursive_verification(model, image, ptb1, true_label, eps, depth=depth+1) and run_recursive_verification(model, image, ptb2, true_label, eps, depth=depth+1)
+
+
+
 
 
 def main():
@@ -156,7 +122,7 @@ def main():
     # images = test_data.data[12:25].view(N, 1, 28, 28)
     images = test_data.data.unsqueeze(1)
     total_time = 0
-    for i, image in enumerate(images[2:3]):
+    for i, image in enumerate(images[0:3]):
         print("Starting image", i)
         image = image.to(torch.float32) / 255.0
 
@@ -187,7 +153,8 @@ def main():
     print(f"Total time: {total_time}")
 
 
-main()
+if __name__ == '__main__':
+    main()
 
 
 
